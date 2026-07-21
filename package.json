@@ -1,0 +1,16 @@
+{
+  "name": "hollo-stream-proxy",
+  "version": "0.9.14",
+  "description": "Hollo OAuth login + WebSocket Streaming + WebPush proxy (Mastodon API compat)",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "pg": "^8.13.0",
+    "web-push": "^3.6.7",
+    "ws": "^8.18.0"
+  }
+}
