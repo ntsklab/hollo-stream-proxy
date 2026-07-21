@@ -129,17 +129,22 @@ sequenceDiagram
     User->>Hollo: 認証して code 取得
     User->>Proxy: POST /auth/login (code)
     Proxy->>Hollo: code → token
-    Proxy->>Hollo: verify token
+    Hollo-->>Proxy: access_token
+    Proxy->>Hollo: verify_credentials
+    Hollo-->>Proxy: account info
     Note over Proxy: ポーリング用トークンを保存
 
     Note over User,Hollo: ② クライアント接続（随時）
     User->>Proxy: WS connect (クライアントの token)
-    Proxy->>Hollo: verify token
+    Proxy->>Hollo: verify_credentials
+    Hollo-->>Proxy: 200 / 401
 
     Note over User,Hollo: ③ ポーリング（①のトークンで定期実行）
     loop
         Proxy->>Hollo: GET /notifications
+        Hollo-->>Proxy: JSON
         Proxy->>Hollo: GET /timelines/home
+        Hollo-->>Proxy: JSON
     end
     Proxy-->>User: イベント配信
     Proxy-->>Push: WebPush
