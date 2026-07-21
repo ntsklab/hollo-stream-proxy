@@ -126,18 +126,26 @@ sequenceDiagram
 
     Note over User,Hollo: ① ポーリング用トークン取得（一度だけ）
     User->>Proxy: GET /
-    User->>Hollo: 認証して code 取得
+    Proxy-->>User: ログインページ
+    User->>Hollo: 認証
+    Hollo-->>User: authorization code
     User->>Proxy: POST /auth/login (code)
-    Proxy->>Hollo: code → token
+    Proxy->>Hollo: POST /oauth/token
     Hollo-->>Proxy: access_token
-    Proxy->>Hollo: verify_credentials
+    Proxy->>Hollo: GET verify_credentials
     Hollo-->>Proxy: account info
+    Proxy-->>User: ログイン成功
     Note over Proxy: ポーリング用トークンを保存
 
     Note over User,Hollo: ② クライアント接続（随時）
     User->>Proxy: WS connect (クライアントの token)
-    Proxy->>Hollo: verify_credentials
-    Hollo-->>Proxy: 200 / 401
+    Proxy->>Hollo: GET verify_credentials
+    Hollo-->>Proxy: 200 OK / 401 Unauthorized
+    alt 成功
+        Proxy-->>User: WS 接続確立
+    else 失敗
+        Proxy-->>User: WS close
+    end
 
     Note over User,Hollo: ③ ポーリング（①のトークンで定期実行）
     loop
