@@ -1,0 +1,85 @@
+# =========================================
+# Hollo Stream Proxy — HAProxy integration sample
+# =========================================
+#
+# Add these sections to your existing haproxy.cfg.
+# Replace NAMESPACE and DOMAIN placeholders.
+
+# ── Frontend: add ACLs ──────────────────────────────────────────────────────
+frontend YOUR_FRONTEND
+  # ... existing config ...
+
+  # Instance API (proxy injects streaming URL)
+  acl isinstance var(txn.path) -i -m str /api/v1/instance
+  acl isinstancev2 var(txn.path) -i -m str /api/v2/instance
+
+  acl isfilters var(txn.path) -i -m str /api/v1/filters
+  acl isfilters var(txn.path) -i -m str /api/v2/filters
+
+  # Hollo Stream Proxy routes
+  acl isstreaming var(txn.path) -i -m str /api/v1/streaming
+  acl ispushsub var(txn.path) -i -m str /api/v1/push/subscription
+
+  use_backend instance-bk if isinstance
+  use_backend instance-bk if isinstancev2
+  use_backend filters-bk if isfilters
+  use_backend streaming-bk if isstreaming
+  use_backend pushsub-bk if ispushsub
+  default_backend hollo-bk
+
+# ── Backend: Instance API proxy ──────────────────────────────────────────────
+backend instance-bk
+  option redispatch
+  option httpchk
+  retries 2
+  retry-on all-retryable-errors
+  http-check send meth GET uri /health hdr Host YOUR_DOMAIN
+  http-check expect status 200
+  server stream-proxy hollo-stream-proxy.NAMESPACE.svc.cluster.local:3001 check inter 5000 rise 2 fall 3 fastinter 1000 downinter 1000 resolvers dns-resolver
+
+# ── Backend: Filters ─────────────────────────────────────────────────────────
+backend filters-bk
+  option redispatch
+  option httpchk
+  retries 2
+  retry-on all-retryable-errors
+  http-check send meth GET uri /health hdr Host YOUR_DOMAIN
+  http-check expect status 200
+  server stream-proxy hollo-stream-proxy.NAMESPACE.svc.cluster.local:3001 check inter 5000 rise 2 fall 3 fastinter 1000 downinter 1000 resolvers dns-resolver
+
+# ── Backend: WebSocket streaming ────────────────────────────────────────────
+backend streaming-bk
+  option redispatch
+  option httpchk
+  retries 2
+  retry-on all-retryable-errors
+  timeout server 24h
+  timeout tunnel 24h
+  http-check send meth GET uri /health hdr Host YOUR_DOMAIN
+  http-check expect status 200
+  server stream-proxy hollo-stream-proxy.NAMESPACE.svc.cluster.local:3001 check inter 5000 rise 2 fall 3 fastinter 1000 downinter 1000 resolvers dns-resolver
+
+# ── Backend: Push Subscription REST API ─────────────────────────────────────
+backend pushsub-bk
+  option redispatch
+  option httpchk
+  retries 2
+  retry-on all-retryable-errors
+  http-check send meth GET uri /health hdr Host YOUR_DOMAIN
+  http-check expect status 200
+  server pushsub-proxy hollo-stream-proxy.NAMESPACE.svc.cluster.local:3001 check inter 5000 rise 2 fall 3 fastinter 1000 downinter 1000 resolvers dns-resolver
+
+# ── Backend: Hollo (default fallback) ──────────────────────────────────────
+backend hollo-bk
+  option redispatch
+  option httpchk
+  retries 2
+  retry-on all-retryable-errors
+  http-check send meth GET uri /health hdr Host YOUR_DOMAIN
+  http-check expect status 200
+  server hollo hollo.NAMESPACE.svc.cluster.local:3000 check inter 5000 rise 2 fall 3 fastinter 1000 downinter 1000 resolvers dns-resolver
+
+# ── DNS resolver (if not already defined) ───────────────────────────────────
+resolvers dns-resolver
+  parse-resolv-conf
+  resolve_retries 3

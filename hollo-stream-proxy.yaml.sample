@@ -1,0 +1,153 @@
+# =========================================
+# Hollo Stream Proxy
+# - WebSocket /api/v1/streaming (Mastodon互換)
+# - WebPush Subscription API /api/v1/push/subscription
+# - Instance API proxy (/api/v1/instance, /api/v2/instance)
+# - Filters endpoint (/api/v1/filters)
+# - Hollo REST API をポーリング
+# =========================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hollo-stream-proxy
+  namespace: <NAMESPACE>
+  labels:
+    app: hollo-stream-proxy
+    role: stream
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: hollo-stream-proxy
+      role: stream
+  template:
+    metadata:
+      labels:
+        app: hollo-stream-proxy
+        role: stream
+    spec:
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: hollo-stream-proxy-data
+      containers:
+        - name: stream-proxy
+          image: nrt.vultrcr.com/ntlab1/hollo-stream-proxy:0.9.14
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: cm-hollo-stream-proxy
+                  key: DATABASE_URL
+            - name: HOLLO_URL
+              value: "https://your-instance.example.com"
+            - name: HOLLO_INTERNAL_URL
+              value: "http://hollo.<NAMESPACE>.svc.cluster.local:3000"
+            - name: POLL_INTERVAL
+              valueFrom:
+                configMapKeyRef:
+                  name: cm-hollo-stream-proxy
+                  key: POLL_INTERVAL
+            - name: VAPID_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: vapid-keys
+                  key: VAPID_PUBLIC_KEY
+            - name: VAPID_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: vapid-keys
+                  key: VAPID_PRIVATE_KEY
+            - name: VAPID_SUBJECT
+              value: "https://your-instance.example.com"
+            - name: DATA_DIR
+              value: "/data"
+            - name: PORT
+              value: "3001"
+          resources:
+            limits:
+              cpu: "2000m"
+              memory: "256Mi"
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+          ports:
+            - containerPort: 3001
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 3001
+            initialDelaySeconds: 5
+            periodSeconds: 2
+            timeoutSeconds: 2
+            successThreshold: 1
+            failureThreshold: 15
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3001
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3001
+            initialDelaySeconds: 30
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cm-hollo-stream-proxy
+  namespace: <NAMESPACE>
+data:
+  DATABASE_URL: postgres://app:CHANGEME@hollo-db-rw.namespace.svc.cluster.local:5432/hollo
+  POLL_INTERVAL: "3000"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hollo-stream-proxy
+  namespace: <NAMESPACE>
+spec:
+  type: ClusterIP
+  selector:
+    app: hollo-stream-proxy
+    role: stream
+  ports:
+    - name: http
+      protocol: TCP
+      port: 3001
+      targetPort: 3001
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vapid-keys
+  namespace: <NAMESPACE>
+type: Opaque
+stringData:
+  # Generate with: node gen-vapid-keys.mjs
+  VAPID_PUBLIC_KEY: "<generate with gen-vapid-keys.mjs>"
+  VAPID_PRIVATE_KEY: "<generate with gen-vapid-keys.mjs>"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hollo-stream-proxy-data
+  namespace: <NAMESPACE>
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
