@@ -115,6 +115,48 @@ GET /api/v1/filters  — 空配列
 GET /api/v2/filters  — 空配列
 ```
 
+## アーキテクチャ
+
+```mermaid
+flowchart LR
+    Client[クライアント] -->|HTTPS/WSS| HAProxy[HAProxy]
+    HAProxy -->|instance / filters / streaming / push| Proxy[Hollo Stream Proxy]
+    HAProxy -->|その他| Hollo[Hollo]
+    Proxy -->|REST API ポーリング| Hollo
+    Proxy -.->|WS イベント配信| Client
+    Proxy -->|WebPush| Push[Push Service]
+    Proxy -->|JSON 永続化| PVC[(PVC)]
+```
+
+## フロントエンド設定
+
+### HAProxy
+
+`haproxy.conf.sample` を参照。要点:
+
+- Instance API / Filters / Streaming / Push を本プロキシに振り分け
+- WebSocket 用バックエンドは `timeout tunnel 24h` を設定
+- ヘルスチェックは `/health`
+
+### Nginx（代替）
+
+```nginx
+location /api/v1/instance { proxy_pass http://hollo-stream-proxy.NAMESPACE:3001; }
+location /api/v2/instance { proxy_pass http://hollo-stream-proxy.NAMESPACE:3001; }
+location /api/v1/filters  { proxy_pass http://hollo-stream-proxy.NAMESPACE:3001; }
+
+location /api/v1/streaming {
+    proxy_pass http://hollo-stream-proxy.NAMESPACE:3001;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 86400s;
+}
+
+location /api/v1/push/subscription {
+    proxy_pass http://hollo-stream-proxy.NAMESPACE:3001;
+}
+```
+
 ## ファイル構成
 
 ```
