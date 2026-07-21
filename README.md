@@ -40,7 +40,7 @@ Push 通知および Streaming 非対応の Hollo で、リアルタイム通知
 ## コンテナイメージ
 
 ```
-nrt.vultrcr.com/ntlab1/hollo-stream-proxy:0.9.16
+nrt.vultrcr.com/ntlab1/hollo-stream-proxy:0.9.17
 ```
 
 ## デプロイ

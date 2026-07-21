@@ -34,7 +34,7 @@ spec:
             claimName: hollo-stream-proxy-data
       containers:
         - name: stream-proxy
-          nrt.vultrcr.com/ntlab1/hollo-stream-proxy:0.9.16
+          nrt.vultrcr.com/ntlab1/hollo-stream-proxy:0.9.17
           imagePullPolicy: IfNotPresent
           env:
             - name: HOLLO_URL
