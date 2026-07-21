@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hollo Stream Proxy</title>
+<style>
+body { font-family: sans-serif; max-width: 600px; margin: 2em auto; padding: 0 1em; }
+h1 { font-size: 1.2em; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #ddd; }
+input, button { padding: 6px 10px; font-size: 14px; }
+input { width: 100%; margin: 8px 0; }
+.msg { padding: 8px; margin: 8px 0; }
+.msg-ok { background: #d4edda; }
+.msg-err { background: #f8d7da; }
+pre { background: #eee; padding: 8px; overflow-x: auto; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>Hollo Stream Proxy</h1>
+{{MESSAGE}}
+{{ERROR}}
+
+<h2>Login</h2>
+<p>Open the link below, copy the authorization code, and paste it here.</p>
+<a href="{{AUTH_URL}}" target="_blank">Authorize with Hollo</a>
+
+<form method="POST" action="/auth/login">
+  <input type="text" name="code" placeholder="Authorization code" required autocomplete="off">
+  <button type="submit">Login</button>
+</form>
+
+<h2>Sessions</h2>
+{{SESSION_LIST}}
+
+<h2>Endpoints</h2>
+<pre>ws://localhost:{{PORT}}/api/v1/streaming?access_token=TOKEN&amp;stream=user</pre>
+</body>
+</html>

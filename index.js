@@ -444,79 +444,37 @@ async function fetchNotificationsAPI(accessToken, sinceId = null) {
 }
 
 // ── HTML Pages ────────────────────────────────────────────────────────────
+
+let loginTemplate = "";
+let tokenTemplate = "";
+
+async function loadTemplates() {
+  const dir = new URL(".", import.meta.url).pathname;
+  loginTemplate = await readFile(`${dir}pages/login.html`, "utf-8");
+  tokenTemplate = await readFile(`${dir}pages/token.html`, "utf-8");
+}
+
 function renderLoginPage(sessions, message = null, error = null) {
-  const sessionList = Object.entries(sessions)
-    .map(([id, s]) => `
-      <tr>
-        <td>${s.account_handle}</td>
-        <td>${s.account_display_name || "-"}</td>
-        <td>${new Date(s.created_at).toISOString().slice(0, 10)}</td>
-        <td><button onclick="if(confirm('Delete?')){fetch('/api/v1/sessions/${id}',{method:'DELETE'}).then(()=>location.reload())}">Delete</button></td>
-      </tr>`)
+  const rows = Object.entries(sessions)
+    .map(([id, s]) => `<tr><td>${s.account_handle}</td><td>${s.account_display_name || "-"}</td><td>${new Date(s.created_at).toISOString().slice(0, 10)}</td><td><button onclick="if(confirm('Delete?')){fetch('/api/v1/sessions/${id}',{method:'DELETE'}).then(()=>location.reload())}">Delete</button></td></tr>`)
     .join("");
-
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Hollo Stream Proxy</title>
-<style>
-body { font-family: sans-serif; max-width: 600px; margin: 2em auto; padding: 0 1em; }
-h1 { font-size: 1.2em; }
-table { border-collapse: collapse; width: 100%; }
-th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #ddd; }
-input, button { padding: 6px 10px; font-size: 14px; }
-input { width: 100%; margin: 8px 0; }
-.msg { padding: 8px; margin: 8px 0; }
-.msg-ok { background: #d4edda; }
-.msg-err { background: #f8d7da; }
-pre { background: #eee; padding: 8px; overflow-x: auto; font-size: 12px; }
-</style>
-</head>
-<body>
-<h1>Hollo Stream Proxy</h1>
-${message ? `<div class="msg msg-ok">${message}</div>` : ""}
-${error ? `<div class="msg msg-err">${error}</div>` : ""}
-
-<h2>Login</h2>
-<p>Open the link below, copy the authorization code, and paste it here.</p>
-<a href="${HOLLO_URL}/oauth/authorize?response_type=code&client_id=${clientCredentials.client_id}&redirect_uri=urn:ietf:wg:oauth:2.0:oob&scope=read" target="_blank">Authorize with Hollo</a>
-
-<form method="POST" action="/auth/login">
-  <input type="text" name="code" placeholder="Authorization code" required autocomplete="off">
-  <button type="submit">Login</button>
-</form>
-
-<h2>Sessions</h2>
-${sessionList ? `<table><tr><th>Handle</th><th>Name</th><th>Date</th><th></th></tr>${sessionList}</table>` : "<p>No sessions</p>"}
-
-<h2>Endpoints</h2>
-<pre>ws://localhost:${PORT}/api/v1/streaming?access_token=TOKEN&amp;stream=user</pre>
-</body>
-</html>`;
+  const list = rows
+    ? `<table><tr><th>Handle</th><th>Name</th><th>Date</th><th></th></tr>${rows}</table>`
+    : "<p>No sessions</p>";
+  const authUrl = `${HOLLO_URL}/oauth/authorize?response_type=code&client_id=${clientCredentials.client_id}&redirect_uri=urn:ietf:wg:oauth:2.0:oob&scope=read`;
+  return loginTemplate
+    .replace("{{MESSAGE}}", message ? `<div class="msg msg-ok">${message}</div>` : "")
+    .replace("{{ERROR}}", error ? `<div class="msg msg-err">${error}</div>` : "")
+    .replace("{{AUTH_URL}}", authUrl)
+    .replace("{{SESSION_LIST}}", list)
+    .replace("{{PORT}}", String(PORT));
 }
 
 function renderTokenPage(tokenData, account) {
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<title>Login Success</title>
-<style>
-body { font-family: sans-serif; max-width: 600px; margin: 2em auto; padding: 0 1em; }
-h1 { font-size: 1.2em; }
-pre { background: #eee; padding: 8px; overflow-x: auto; font-size: 12px; }
-</style>
-</head>
-<body>
-<h1>Login Success</h1>
-<p>Logged in as <strong>${account.display_name || account.acct}</strong> (@${account.acct}).</p>
-<p>Polling token:</p>
-<pre>${tokenData.access_token}</pre>
-<p><a href="/">Back</a></p>
-</body>
-</html>`;
+  return tokenTemplate
+    .replace("{{DISPLAY_NAME}}", account.display_name || account.acct)
+    .replace("{{ACCT}}", account.acct)
+    .replace("{{ACCESS_TOKEN}}", tokenData.access_token);
 }
 
 // ── Server ────────────────────────────────────────────────────────────────
@@ -1036,7 +994,8 @@ async function sendPushNotification(sub, payload) {
 
 // ─ Start server ──────────────────────────────────────────────────────────
 // Start server after app registration
-registerApp().then(() => {
+registerApp().then(async () => {
+  await loadTemplates();
   server.listen(PORT, () => {
     logger.info(`Hollo Stream Proxy listening on port ${PORT}`);
     logger.info(`Hollo URL: ${HOLLO_URL}`);
