@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Hollo Stream Proxy (TheDesk v25 風 OAuth + DB認証)
+ * Hollo Stream Proxy
  *
  * 機能:
  * 1. OAuth ログイン (authorization code を手動入力)
@@ -8,7 +8,7 @@
  * 3. WebPush Subscription API (/api/v1/push/subscription)
  *
  * 認証方式:
- * - ログイン: TheDesk v25風 (code手動入力 → token取得)
+ * - ログイン: OAuth authorization code → token 交換
  * - WebSocket/Push: DBのoauth_tokensテーブルでトークン検証
  * - データ取得: Hollo API (/timelines/home, /notifications) をポーリング
  */
@@ -213,7 +213,7 @@ async function validateToken(token) {
 
 // ── Exchange authorization code for token ────────────────────────────────
 async function exchangeCodeForToken(code) {
-  // TheDesk v25風: authorization codeを直接使用
+  // OAuth authorization code → token 交換
   const res = await fetch(`${HOLLO_URL}/oauth/token`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
