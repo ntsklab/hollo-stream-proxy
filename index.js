@@ -447,156 +447,74 @@ async function fetchNotificationsAPI(accessToken, sinceId = null) {
 function renderLoginPage(sessions, message = null, error = null) {
   const sessionList = Object.entries(sessions)
     .map(([id, s]) => `
-      <li class="session-item">
-        <div class="session-info">
-          <img src="${s.account_avatar || ''}" alt="" class="avatar" onerror="this.style.display='none'">
-          <div>
-            <strong>${s.account_display_name || s.account_handle}</strong>
-            <div class="handle">${s.account_handle}</div>
-            <div class="time">ログイン: ${new Date(s.created_at).toLocaleString('ja-JP')}</div>
-          </div>
-        </div>
-        <button onclick="if(confirm('このセッションを削除しますか？')){fetch('/api/v1/sessions/${id}',{method:'DELETE'}).then(()=>location.reload())}" class="btn-danger">削除</button>
-      </li>
-    `)
+      <tr>
+        <td>${s.account_handle}</td>
+        <td>${s.account_display_name || "-"}</td>
+        <td>${new Date(s.created_at).toISOString().slice(0, 10)}</td>
+        <td><button onclick="if(confirm('Delete?')){fetch('/api/v1/sessions/${id}',{method:'DELETE'}).then(()=>location.reload())}">Delete</button></td>
+      </tr>`)
     .join("");
-  
+
   return `<!DOCTYPE html>
-<html lang="ja">
+<html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Hollo Stream Proxy</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 700px; margin: 0 auto; padding: 20px; background: #f8f9fa; color: #333; }
-    h1 { color: #6364ff; margin-bottom: 20px; font-size: 24px; }
-    .card { background: white; border-radius: 8px; padding: 20px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-    .btn { display: inline-block; padding: 10px 20px; background: #6364ff; color: white; border: none; border-radius: 6px; cursor: pointer; text-decoration: none; font-size: 14px; }
-    .btn:hover { background: #5253e0; }
-    .btn-danger { background: #dc3545; }
-    .btn-danger:hover { background: #c82333; }
-    .btn-success { background: #28a745; }
-    .btn-success:hover { background: #218838; }
-    input[type="text"] { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; margin: 10px 0; font-family: monospace; }
-    .session-list { list-style: none; }
-    .session-item { display: flex; justify-content: space-between; align-items: center; padding: 15px 0; border-bottom: 1px solid #eee; }
-    .session-item:last-child { border-bottom: none; }
-    .session-info { display: flex; gap: 12px; align-items: center; }
-    .avatar { width: 48px; height: 48px; border-radius: 50%; object-fit: cover; }
-    .handle { color: #666; font-size: 13px; }
-    .time { color: #999; font-size: 12px; margin-top: 4px; }
-    .message { padding: 12px; border-radius: 6px; margin-bottom: 15px; }
-    .message.success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
-    .message.error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
-    .token-display { background: #f8f9fa; padding: 15px; border-radius: 6px; margin: 15px 0; word-break: break-all; font-family: monospace; font-size: 12px; border: 1px solid #e9ecef; }
-    .info { color: #666; font-size: 14px; line-height: 1.6; }
-    .warning { background: #fff3cd; color: #856404; padding: 12px; border-radius: 6px; margin: 15px 0; border: 1px solid #ffeaa7; font-size: 13px; }
-    .step { background: #e7f3ff; padding: 12px; border-radius: 6px; margin: 10px 0; border-left: 4px solid #6364ff; }
-    .step strong { color: #6364ff; }
-    .copy-btn { padding: 4px 10px; font-size: 12px; margin-left: 8px; cursor: pointer; background: #6c757d; color: white; border: none; border-radius: 4px; }
-    .copy-btn:hover { background: #5a6268; }
-    h2 { font-size: 18px; margin-bottom: 15px; color: #444; }
-    h3 { font-size: 15px; margin: 15px 0 10px; color: #555; }
-    pre { background: #f8f9fa; padding: 15px; border-radius: 6px; overflow-x: auto; font-size: 12px; border: 1px solid #e9ecef; }
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hollo Stream Proxy</title>
+<style>
+body { font-family: sans-serif; max-width: 600px; margin: 2em auto; padding: 0 1em; }
+h1 { font-size: 1.2em; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #ddd; }
+input, button { padding: 6px 10px; font-size: 14px; }
+input { width: 100%; margin: 8px 0; }
+.msg { padding: 8px; margin: 8px 0; }
+.msg-ok { background: #d4edda; }
+.msg-err { background: #f8d7da; }
+pre { background: #eee; padding: 8px; overflow-x: auto; font-size: 12px; }
+</style>
 </head>
 <body>
-  <h1>🔵 Hollo Stream Proxy</h1>
-  
-  ${message ? `<div class="message success">${message}</div>` : ''}
-  ${error ? `<div class="message error">${error}</div>` : ''}
-  
-  <div class="card">
-    <h2>新規ログイン</h2>
-    <div class="step">
-      <strong>ステップ1:</strong> 下のリンクをクリックしてHolloで認証し、表示される<b>authorization code</b>をコピーしてください
-    </div>
-    <a href="${HOLLO_URL}/oauth/authorize?response_type=code&client_id=${clientCredentials.client_id}&redirect_uri=urn:ietf:wg:oauth:2.0:oob&scope=read" target="_blank" class="btn">Holloで認証する</a>
-    
-    <div class="step" style="margin-top: 15px;">
-      <strong>ステップ2:</strong> コピーしたcodeを下のフォームに貼り付けて送信してください
-    </div>
-    <form method="POST" action="/auth/login">
-      <input type="text" name="code" placeholder="Authorization codeを貼り付け..." required autocomplete="off">
-      <button type="submit" class="btn btn-success">ログイン</button>
-    </form>
-  </div>
-  
-  <div class="card">
-    <h2>ログイン済みセッション</h2>
-    ${sessionList || '<p class="info">ログイン済みセッションはありません</p>'}
-  </div>
-  
-  <div class="card">
-    <h2>API エンドポイント</h2>
-    <div class="info">
-      <p>
-        以下の接続には、<strong>Hollo本体で各クライアントに発行した既存のアクセストークン</strong>を使用してください。<br>
-        （ここでOAuthログインして取得するトークンはproxyのポーリング用です。）
-      </p>
-      <p><strong>WebSocket Streaming:</strong></p>
-      <div class="token-display">
-        ws://localhost:${PORT}/api/v1/streaming?access_token=<em>Holloのアクセストークン</em>&stream=user
-      </div>
-      <p><strong>WebPush Subscription:</strong></p>
-      <div class="token-display">
-        POST http://localhost:${PORT}/api/v1/push/subscription
-      </div>
-    </div>
-  </div>
+<h1>Hollo Stream Proxy</h1>
+${message ? `<div class="msg msg-ok">${message}</div>` : ""}
+${error ? `<div class="msg msg-err">${error}</div>` : ""}
+
+<h2>Login</h2>
+<p>Open the link below, copy the authorization code, and paste it here.</p>
+<a href="${HOLLO_URL}/oauth/authorize?response_type=code&client_id=${clientCredentials.client_id}&redirect_uri=urn:ietf:wg:oauth:2.0:oob&scope=read" target="_blank">Authorize with Hollo</a>
+
+<form method="POST" action="/auth/login">
+  <input type="text" name="code" placeholder="Authorization code" required autocomplete="off">
+  <button type="submit">Login</button>
+</form>
+
+<h2>Sessions</h2>
+${sessionList ? `<table><tr><th>Handle</th><th>Name</th><th>Date</th><th></th></tr>${sessionList}</table>` : "<p>No sessions</p>"}
+
+<h2>Endpoints</h2>
+<pre>ws://localhost:${PORT}/api/v1/streaming?access_token=TOKEN&amp;stream=user</pre>
 </body>
 </html>`;
 }
 
 function renderTokenPage(tokenData, account) {
   return `<!DOCTYPE html>
-<html lang="ja">
+<html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Login Success - Hollo Stream Proxy</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 700px; margin: 0 auto; padding: 20px; background: #f8f9fa; color: #333; }
-    h1 { color: #6364ff; margin-bottom: 20px; font-size: 24px; }
-    .card { background: white; border-radius: 8px; padding: 20px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-    .btn { display: inline-block; padding: 10px 20px; background: #6364ff; color: white; border: none; border-radius: 6px; cursor: pointer; text-decoration: none; font-size: 14px; }
-    .btn:hover { background: #5253e0; }
-    .token-display { background: #f8f9fa; padding: 15px; border-radius: 6px; margin: 15px 0; word-break: break-all; font-family: monospace; font-size: 12px; border: 1px solid #e9ecef; position: relative; }
-    .copy-btn { padding: 4px 10px; font-size: 12px; margin-left: 8px; cursor: pointer; background: #6c757d; color: white; border: none; border-radius: 4px; }
-    .copy-btn:hover { background: #5a6268; }
-    .info { color: #666; font-size: 14px; line-height: 1.6; }
-    .success { background: #d4edda; color: #155724; padding: 15px; border-radius: 6px; margin: 15px 0; border: 1px solid #c3e6cb; }
-    h2 { font-size: 18px; margin-bottom: 15px; color: #444; }
-    pre { background: #f8f9fa; padding: 15px; border-radius: 6px; overflow-x: auto; font-size: 12px; border: 1px solid #e9ecef; }
-  </style>
+<meta charset="UTF-8">
+<title>Login Success</title>
+<style>
+body { font-family: sans-serif; max-width: 600px; margin: 2em auto; padding: 0 1em; }
+h1 { font-size: 1.2em; }
+pre { background: #eee; padding: 8px; overflow-x: auto; font-size: 12px; }
+</style>
 </head>
 <body>
-  <h1>✅ ログイン成功</h1>
-  <div class="card">
-    <div class="success">
-      <strong>${account.display_name || account.acct}</strong> (@${account.acct}) としてログインしました。
-    </div>
-    
-    <h2>ポーリング用トークン</h2>
-    <p class="info">
-      このトークンは <strong>stream-proxyがHollo APIをポーリングするため</strong> に使用されます。<br>
-      WebSocketクライアントやMastodonアプリで使用するトークンとは<strong>別物</strong>です。
-    </p>
-    <div class="token-display">
-      ${tokenData.access_token}
-      <button class="copy-btn" onclick="navigator.clipboard.writeText('${tokenData.access_token}').then(()=>this.textContent='コピーしました！')">コピー</button>
-    </div>
-
-    <h2>WebSocketクライアント接続例</h2>
-    <p class="info">
-      WebSocketに接続する際は、<strong>Hollo本体で既に発行されている各クライアント用のアクセストークン</strong>を使用してください。
-    </p>
-    <pre>WebSocket: ws://localhost:${PORT}/api/v1/streaming?access_token=<em>あなたのHolloアクセストークン</em>&stream=user</pre>
-
-    <a href="/" class="btn">戻る</a>
-  </div>
+<h1>Login Success</h1>
+<p>Logged in as <strong>${account.display_name || account.acct}</strong> (@${account.acct}).</p>
+<p>Polling token:</p>
+<pre>${tokenData.access_token}</pre>
+<p><a href="/">Back</a></p>
 </body>
 </html>`;
 }
