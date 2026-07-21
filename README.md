@@ -116,37 +116,33 @@ GET /api/v2/filters  — 空配列
 
 ## アーキテクチャ
 
+Proxy は Hollo API ポーリング用のトークンを OAuth で取得し、クライアントの接続時はそのクライアントのトークンを Hollo に問い合わせて検証する。
+
 ```mermaid
 sequenceDiagram
-    actor User
-    participant Proxy as Stream Proxy
+    actor Admin
+    participant Proxy
     participant Hollo
 
-    rect rgb(240,248,255)
-        Note over User,Hollo: OAuth ログイン
-        User->>Proxy: GET /
-        Proxy->>User: Hollo authorize画面へリダイレクト
-        User->>Hollo: 認証
-        Hollo->>User: authorization code
-        User->>Proxy: POST /auth/login (code)
-        Proxy->>Hollo: POST /oauth/token (code→token)
-        Hollo->>Proxy: access_token
-        Proxy->>Hollo: GET verify_credentials
-        Hollo->>Proxy: account info
-        Proxy->>Proxy: session保存
-    end
+    Note over Admin,Hollo: ① セットアップ（一度だけ）
+    Admin->>Proxy: GET /
+    Admin->>Hollo: 認証して code 取得
+    Admin->>Proxy: POST /auth/login (code)
+    Proxy->>Hollo: code → token
+    Proxy->>Hollo: verify token（account 確認）
+    Note over Proxy: ポーリング用 token を保存
 
-    rect rgb(255,248,240)
-        Note over User,Hollo: 実行時
-        User->>Proxy: WS /api/v1/streaming (access_token)
-        Proxy->>Hollo: トークン検証 (verify_credentials)
-        loop ポーリング
-            Proxy->>Hollo: GET /api/v1/notifications
-            Proxy->>Hollo: GET /api/v1/timelines/home
-        end
-        Proxy-->>User: イベント配信
-        Proxy->>Push: WebPush通知
+    Note over Admin,Hollo: ② クライアント接続（随時）
+    Client->>Proxy: WS connect (クライアントの token)
+    Proxy->>Hollo: verify token（クライアントの token）
+
+    Note over Admin,Hollo: ③ ポーリング（proxy の token で定期実行）
+    loop
+        Proxy->>Hollo: GET /notifications
+        Proxy->>Hollo: GET /timelines/home
     end
+    Proxy-->>Client: イベント配信
+    Proxy-->>Push: WebPush
 ```
 
 ## フロントエンド設定
