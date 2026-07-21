@@ -117,14 +117,27 @@ GET /api/v2/filters  — 空配列
 ## アーキテクチャ
 
 ```mermaid
-flowchart LR
-    Client[クライアント] -->|HTTPS/WSS| HAProxy[HAProxy]
-    HAProxy -->|instance / filters / streaming / push| Proxy[Hollo Stream Proxy]
-    HAProxy -->|その他| Hollo[Hollo]
-    Proxy -->|REST API ポーリング| Hollo
-    Proxy -.->|WS イベント配信| Client
-    Proxy -->|WebPush| Push[Push Service]
-    Proxy -->|JSON 永続化| PVC[(PVC)]
+flowchart TB
+    subgraph Auth[OAuth 認証]
+        direction LR
+        C1[クライアント] -->|"1. GET /"| P
+        P -->|"2. Hollo authorize画面へ"| H
+        H -->|"3. auth code"| C1
+        C1 -->|"4. POST /auth/login"| P
+        P -->|"5. code→token"| H
+        P -->|"6. verify token"| H
+    end
+
+    subgraph Runtime[実行時]
+        direction LR
+        C2[クライアント] -->|"WSS"| HA[HAProxy]
+        HA -->|"streaming/push<br/>instance/filters"| P[Hollo Stream Proxy]
+        HA -->|"その他"| H[Hollo]
+        P -.->|"イベント配信"| C2
+        P -->|"WebPush"| PS[Push Service]
+        P -->|"ポーリング"| H
+        P -->|"永続化"| PVC[(PVC)]
+    end
 ```
 
 ## フロントエンド設定
