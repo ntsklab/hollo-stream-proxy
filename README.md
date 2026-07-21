@@ -26,7 +26,6 @@ Push 通知および Streaming 非対応の Hollo で、リアルタイム通知
 |---|---|---|---|
 | `HOLLO_URL` | **必須** | — | Hollo の公開 URL |
 | `HOLLO_INTERNAL_URL` | | `HOLLO_URL` | Hollo の内部 URL（K8s Service DNS 等） |
-| `DATABASE_URL` | **必須** | — | Hollo の PostgreSQL 接続文字列（トークン検証用） |
 | `PORT` | | `3001` | リッスンポート |
 | `POLL_INTERVAL` | | `3000` | ポーリング間隔（ミリ秒） |
 | `DATA_DIR` | | `/data` | セッション・購読データの保存先 |
@@ -58,7 +57,7 @@ node gen-vapid-keys.mjs
 cp hollo-stream-proxy.yaml.sample hollo-stream-proxy.yaml
 ```
 
-`<NAMESPACE>` を置換し、`DATABASE_URL`、`HOLLO_URL`、VAPID 鍵を設定。
+`<NAMESPACE>` を置換し、`HOLLO_URL`、VAPID 鍵を設定。
 
 ### 3. デプロイ
 

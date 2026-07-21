@@ -37,11 +37,6 @@ spec:
           nrt.vultrcr.com/ntlab1/hollo-stream-proxy:0.9.16
           imagePullPolicy: IfNotPresent
           env:
-            - name: DATABASE_URL
-              valueFrom:
-                configMapKeyRef:
-                  name: cm-hollo-stream-proxy
-                  key: DATABASE_URL
             - name: HOLLO_URL
               value: "https://your-instance.example.com"
             - name: HOLLO_INTERNAL_URL
@@ -110,7 +105,6 @@ metadata:
   name: cm-hollo-stream-proxy
   namespace: <NAMESPACE>
 data:
-  DATABASE_URL: postgres://app:CHANGEME@hollo-db-rw.namespace.svc.cluster.local:5432/hollo
   POLL_INTERVAL: "3000"
 ---
 apiVersion: v1

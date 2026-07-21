@@ -17,19 +17,13 @@ import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import { createServer } from "node:http";
 import { WebSocketServer } from "ws";
 import webpush from "web-push";
-import pg from "pg";
 
 // ─ Config ────────────────────────────────────────────────────────────────
 const PORT = parseInt(process.env.PORT || "3001", 10);
 const HOLLO_URL = process.env.HOLLO_URL;
 const HOLLO_INTERNAL_URL = process.env.HOLLO_INTERNAL_URL || HOLLO_URL;
-const DATABASE_URL = process.env.DATABASE_URL;
 if (!HOLLO_URL) {
   console.error("FATAL: HOLLO_URL environment variable is required");
-  process.exit(1);
-}
-if (!DATABASE_URL) {
-  console.error("FATAL: DATABASE_URL environment variable is required");
   process.exit(1);
 }
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL || "5000", 10);
@@ -71,13 +65,7 @@ if (VAPID_PRIVATE_KEY) {
 // ── Data dir ──────────────────────────────────────────────────────────────
 await mkdir(DATA_DIR, { recursive: true });
 
-// ── PostgreSQL pool ───────────────────────────────────────────────────────
-const pool = new pg.Pool({
-  connectionString: DATABASE_URL,
-  max: 10,
-  idleTimeoutMillis: 60_000,
-});
-
+// ── Push subscriptions (PVC JSON file) ───────────────────────────────────
 // ── Token cache (DBクエリ削減) ──────────────────────────────────────────
 const tokenCache = new Map(); // token → { accountOwnerId, scopes, valid, expiresAt }
 const TOKEN_CACHE_TTL_MS = 300_000; // 5 min
@@ -169,44 +157,41 @@ async function registerApp() {
   logger.info("app registered", { client_id: clientCredentials.client_id });
 }
 
-// ── Validate token via DB (oauth_tokensテーブル) ───────────────────────
-async function validateToken(token) {
+// ── Token validation via Hollo API ──────────────────────────────────────
+async function verifyToken(token) {
   if (!token) return null;
-  
-  // キャッシュ確認
+
   const cached = tokenCache.get(token);
   if (cached) {
     if (cached.valid && cached.expiresAt > Date.now()) return cached;
     if (!cached.valid && cached.expiresAt > Date.now()) return null;
   }
-  
+
   try {
-    // access_tokensテーブルでトークンを検索（Holloの正しいテーブル名）
-    const result = await pool.query(
-      `SELECT account_owner_id, scopes, created
-       FROM access_tokens
-       WHERE code = $1`,
-      [token],
-    );
-    
-    if (result.rows.length === 0) {
-      // トークンが見つからない
-      const info = { valid: false, expiresAt: Date.now() + TOKEN_CACHE_NEG_TTL_MS };
-      tokenCache.set(token, info);
+    const res = await fetch(`${HOLLO_INTERNAL_URL}/api/v1/accounts/verify_credentials`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) {
+      tokenCache.set(token, { valid: false, expiresAt: Date.now() + TOKEN_CACHE_NEG_TTL_MS });
       return null;
     }
-    
-    const row = result.rows[0];
+    const account = await res.json();
     const info = {
-      accountOwnerId: row.account_owner_id,
-      scopes: row.scopes ? row.scopes : [],
+      accountOwnerId: account.id,
+      scopes: [],
       valid: true,
       expiresAt: Date.now() + TOKEN_CACHE_TTL_MS,
+      account: {
+        id: account.id,
+        acct: account.acct || account.username,
+        display_name: account.display_name || account.username,
+        avatar: account.avatar || "",
+      },
     };
     tokenCache.set(token, info);
     return info;
   } catch (err) {
-    logger.error("token validation failed", { error: err.message });
+    logger.error("token verification failed", { error: err.message });
     return null;
   }
 }
@@ -233,31 +218,6 @@ async function exchangeCodeForToken(code) {
   }
   
   return await res.json();
-}
-
-// ── Get account info from DB ─────────────────────────────────────────────
-async function getAccountInfo(accountId) {
-  try {
-    const result = await pool.query(
-      `SELECT id, handle, name, avatar_url
-       FROM accounts
-       WHERE id = $1`,
-      [accountId],
-    );
-    
-    if (result.rows.length === 0) return null;
-    
-    const row = result.rows[0];
-    return {
-      id: row.id,
-      acct: row.handle,
-      display_name: row.name,
-      avatar: row.avatar_url,
-    };
-  } catch (err) {
-    logger.error("get account info failed", { error: err.message });
-    return null;
-  }
 }
 
 // ── Push subscriptions ──────────────────────────────────────────────────
@@ -524,17 +484,12 @@ const server = createServer(async (req, res) => {
       const tokenData = await exchangeCodeForToken(code);
       
       // Validate token via DB to get account_id
-      const tokenInfo = await validateToken(tokenData.access_token);
+      const tokenInfo = await verifyToken(tokenData.access_token);
       if (!tokenInfo?.accountOwnerId) {
         throw new Error("Token validation failed");
       }
-      
-      // Get account info from DB
-      const account = await getAccountInfo(tokenInfo.accountOwnerId);
-      if (!account) {
-        throw new Error("Account not found");
-      }
-      
+      const account = tokenInfo.account;
+
       // Save session
       await addOAuthSession({
         access_token: tokenData.access_token,
@@ -597,7 +552,7 @@ const server = createServer(async (req, res) => {
       return;
     }
     
-    const tokenInfo = await validateToken(bearerToken);
+    const tokenInfo = await verifyToken(bearerToken);
     if (!tokenInfo?.accountOwnerId) {
       res.writeHead(401, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Unauthorized" }));
@@ -737,7 +692,7 @@ server.on("upgrade", async (req, socket, head) => {
     return;
   }
   
-  const tokenInfo = await validateToken(token);
+  const tokenInfo = await verifyToken(token);
   if (!tokenInfo?.accountOwnerId) {
     socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
     socket.destroy();
