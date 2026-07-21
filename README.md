@@ -117,26 +117,35 @@ GET /api/v2/filters  — 空配列
 ## アーキテクチャ
 
 ```mermaid
-flowchart TB
-    subgraph Auth[OAuth 認証]
-        direction LR
-        C1[クライアント] -->|"1. GET /"| P
-        P -->|"2. Hollo authorize画面へ"| H
-        H -->|"3. auth code"| C1
-        C1 -->|"4. POST /auth/login"| P
-        P -->|"5. code→token"| H
-        P -->|"6. verify token"| H
+sequenceDiagram
+    actor User
+    participant Proxy as Stream Proxy
+    participant Hollo
+
+    rect rgb(240,248,255)
+        Note over User,Hollo: OAuth ログイン
+        User->>Proxy: GET /
+        Proxy->>User: Hollo authorize画面へリダイレクト
+        User->>Hollo: 認証
+        Hollo->>User: authorization code
+        User->>Proxy: POST /auth/login (code)
+        Proxy->>Hollo: POST /oauth/token (code→token)
+        Hollo->>Proxy: access_token
+        Proxy->>Hollo: GET verify_credentials
+        Hollo->>Proxy: account info
+        Proxy->>Proxy: session保存
     end
 
-    subgraph Runtime[実行時]
-        direction LR
-        C2[クライアント] -->|"WSS"| HA[HAProxy]
-        HA -->|"streaming/push<br/>instance/filters"| P[Hollo Stream Proxy]
-        HA -->|"その他"| H[Hollo]
-        P -.->|"イベント配信"| C2
-        P -->|"WebPush"| PS[Push Service]
-        P -->|"ポーリング"| H
-        P -->|"永続化"| PVC[(PVC)]
+    rect rgb(255,248,240)
+        Note over User,Hollo: 実行時
+        User->>Proxy: WS /api/v1/streaming (access_token)
+        Proxy->>Hollo: トークン検証 (verify_credentials)
+        loop ポーリング
+            Proxy->>Hollo: GET /api/v1/notifications
+            Proxy->>Hollo: GET /api/v1/timelines/home
+        end
+        Proxy-->>User: イベント配信
+        Proxy->>Push: WebPush通知
     end
 ```
 
