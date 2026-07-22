@@ -806,13 +806,51 @@ server.on("upgrade", async (req, socket, head) => {
   const account = tokenInfo.accountOwnerId;
   
   wss.handleUpgrade(req, socket, head, (ws) => {
-    const streamEntry = { ws, stream, listId, tag, initialized: false, userAgent: req.headers["user-agent"] || "" };
-    
+    const subscriptions = new Map();
+
+    function addSubscription(subStream, params = {}) {
+      const subListId = subStream === "list" ? params.list : null;
+      const subTag = (subStream === "hashtag" || subStream === "hashtag:local") ? params.tag : null;
+      const key = subListId ? `list:${subListId}` : subTag ? `${subStream}:${subTag}` : subStream;
+      subscriptions.set(key, { stream: subStream, listId: subListId, tag: subTag });
+      logger.stream("subscribed", { account, stream: subStream, listId: subListId, tag: subTag });
+    }
+
+    function removeSubscription(subStream, params = {}) {
+      const subListId = subStream === "list" ? params.list : null;
+      const subTag = (subStream === "hashtag" || subStream === "hashtag:local") ? params.tag : null;
+      const key = subListId ? `list:${subListId}` : subTag ? `${subStream}:${subTag}` : subStream;
+      subscriptions.delete(key);
+      logger.stream("unsubscribed", { account, stream: subStream, listId: subListId, tag: subTag });
+    }
+
+    function hasSubscription(subStream, listIdOrTag = null) {
+      if (subStream === "list") return subscriptions.has(`list:${listIdOrTag}`);
+      if (subStream === "hashtag" || subStream === "hashtag:local") return subscriptions.has(`${subStream}:${listIdOrTag}`);
+      return subscriptions.has(subStream);
+    }
+
+    ws.on("message", (data, isBinary) => {
+      if (isBinary) return;
+      let json;
+      try { json = JSON.parse(data.toString("utf8")); } catch { return; }
+      if (!json || typeof json !== "object") return;
+      const { type, stream: msgStream, ...params } = json;
+      if (type === "subscribe" && typeof msgStream === "string") {
+        addSubscription(msgStream, params);
+        startPolling();
+      } else if (type === "unsubscribe" && typeof msgStream === "string") {
+        removeSubscription(msgStream, params);
+      }
+    });
+
+    const streamEntry = { ws, subscriptions, initialized: false, userAgent: req.headers["user-agent"] || "" };
+
     if (!activeStreams.has(account)) {
       activeStreams.set(account, new Set());
     }
     activeStreams.get(account).add(streamEntry);
-    
+
     ws.on("close", () => {
       const streams = activeStreams.get(account);
       if (streams) {
@@ -821,8 +859,10 @@ server.on("upgrade", async (req, socket, head) => {
       }
       logger.stream("disconnected", { account });
     });
-    
-    logger.stream("connected", { account, stream, listId });
+
+    if (stream) addSubscription(stream, { list: listId, tag });
+
+    logger.stream("connected", { account });
     startPolling();
   });
 });
@@ -924,15 +964,18 @@ function startPolling() {
     for (const accountOwnerId of accountIds) {
       const streams = activeStreams.get(accountOwnerId);
       const hasUserStream = streams && [...streams].some(
-        (s) => s.stream === "user" || s.stream === "user:notification",
+        (s) => s.subscriptions.has("user") || s.subscriptions.has("user:notification"),
       );
       const hasTimelineStream = streams && [...streams].some(
-        (s) => s.stream === "user",
+        (s) => s.subscriptions.has("user"),
       );
-      const listStreams = streams
-        ? [...streams].filter((s) => s.stream === "list" && s.listId)
+      const listSubs = streams
+        ? [...streams].flatMap((s) =>
+            [...s.subscriptions.values()].filter((sub) => sub.stream === "list" && sub.listId)
+          )
         : [];
-      const listIds = [...new Set(listStreams.map((s) => s.listId))];
+      const listIds = [...new Set(listSubs.map((s) => s.listId))];
+      const listStreamEntries = streams
       
       // Get access token from OAuth sessions (補助情報)
       const sessions = await listOAuthSessions();
@@ -971,15 +1014,16 @@ function startPolling() {
 
                 for (const s of streams || []) {
                   if (s.ws.readyState !== 1) continue;
-                  if (s.stream !== "user" && s.stream !== "user:notification") continue;
+                  if (!s.subscriptions.has("user") && !s.subscriptions.has("user:notification")) continue;
 
-                  if (markNotificationSent(accountOwnerId, String(n.id), s.stream)) {
+                  const notifStream = s.subscriptions.has("user:notification") ? "user:notification" : "user";
+                  if (markNotificationSent(accountOwnerId, String(n.id), notifStream)) {
                     wsSkipped++;
                     continue;
                   }
 
                   const eventJson = JSON.stringify({
-                    stream: [s.stream],
+                    stream: [notifStream],
                     event: "notification",
                     payload: JSON.stringify(sanitized),
                   });
@@ -1054,9 +1098,9 @@ function startPolling() {
                 }
 
                 for (const s of streams) {
-                  if (s.stream === "user" && s.ws.readyState === 1) {
+                  if (s.subscriptions.has("user") && s.ws.readyState === 1) {
                     const eventJson = JSON.stringify({
-                      stream: [s.stream],
+                      stream: ["user"],
                       event: "update",
                       payload: JSON.stringify(sanitizeStatus(status)),
                     });
@@ -1102,8 +1146,9 @@ function startPolling() {
                   continue;
                 }
 
-                for (const s of listStreams) {
-                  if (s.listId === lid && s.ws.readyState === 1) {
+                for (const s of streams) {
+                  const sub = s.subscriptions.get(`list:${lid}`);
+                  if (sub && s.ws.readyState === 1) {
                     const eventJson = JSON.stringify({
                       stream: ["list"],
                       event: "update",
@@ -1131,13 +1176,17 @@ function startPolling() {
       // Public timelines
       const publicStreams = streams
         ? [...streams].filter((s) =>
-            s.stream === "public" ||
-            s.stream === "public:local" ||
-            s.stream === "public:remote")
+            s.subscriptions.has("public") ||
+            s.subscriptions.has("public:local") ||
+            s.subscriptions.has("public:remote"))
         : [];
       const publicVariants = new Map();
       for (const s of publicStreams) {
-        publicVariants.set(s.stream, { local: s.stream === "public:local", remote: s.stream === "public:remote" });
+        ["public", "public:local", "public:remote"].forEach((st) => {
+          if (s.subscriptions.has(st)) {
+            publicVariants.set(st, { local: st === "public:local", remote: st === "public:remote" });
+          }
+        });
       }
       for (const [streamKey, { local, remote }] of publicVariants) {
         try {
@@ -1162,7 +1211,7 @@ function startPolling() {
                 }
 
                 const applicableStreams = streams
-                  ? [...streams].filter((s) => s.stream === streamKey)
+                  ? [...streams].filter((s) => s.subscriptions.has(streamKey))
                   : [];
                 for (const s of applicableStreams) {
                   if (s.ws.readyState === 1) {
@@ -1193,13 +1242,18 @@ function startPolling() {
       // Hashtag timelines
       const hashtagStreams = streams
         ? [...streams].filter((s) =>
-            (s.stream === "hashtag" || s.stream === "hashtag:local") && s.tag)
+            [...s.subscriptions.values()].some((sub) =>
+              (sub.stream === "hashtag" || sub.stream === "hashtag:local") && sub.tag))
         : [];
       const hashtagGroups = new Map();
       for (const s of hashtagStreams) {
-        const key = `${s.stream}:${s.tag}`;
-        if (!hashtagGroups.has(key)) {
-          hashtagGroups.set(key, { stream: s.stream, tag: s.tag, local: s.stream === "hashtag:local" });
+        for (const sub of s.subscriptions.values()) {
+          if ((sub.stream === "hashtag" || sub.stream === "hashtag:local") && sub.tag) {
+            const key = `${sub.stream}:${sub.tag}`;
+            if (!hashtagGroups.has(key)) {
+              hashtagGroups.set(key, { stream: sub.stream, tag: sub.tag, local: sub.stream === "hashtag:local" });
+            }
+          }
         }
       }
       for (const [key, { stream: streamKey, tag: htTag, local }] of hashtagGroups) {
@@ -1226,7 +1280,10 @@ function startPolling() {
                 }
 
                 const applicableStreams = streams
-                  ? [...streams].filter((s) => s.stream === streamKey && s.tag === htTag)
+                  ? [...streams].filter((s) => {
+                      const sub = s.subscriptions.get(`${streamKey}:${htTag}`);
+                      return sub && sub.tag === htTag;
+                    })
                   : [];
                 for (const s of applicableStreams) {
                   if (s.ws.readyState === 1) {
