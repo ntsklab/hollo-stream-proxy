@@ -1,0 +1,56 @@
+# AGENTS.md
+
+## Project Overview
+
+Hollo Stream Proxy is a Node.js (ESM) proxy that adds WebSocket streaming and WebPush support for [Hollo](https://github.com/fedify-dev/hollo), a Mastodon-compatible ActivityPub server that lacks native streaming.
+
+Single-file architecture: all logic lives in `index.js`.
+
+## Development
+
+```bash
+npm install
+npm run dev          # node --watch index.js
+```
+
+Required env var: `HOLLO_URL`. See `README.md` for full env var list.
+
+## Testing
+
+No test framework. Verify via:
+- `node --check index.js` (syntax check)
+- Manual testing with a running Hollo instance
+
+## Code Conventions
+
+- **Language**: JavaScript (ESM, `"type": "module"`)
+- **Runtime**: Node.js 24+
+- **No transpilation**: raw `.js`, no TypeScript
+- **No comments** unless explicitly requested
+- **No external frameworks**: only `ws` and `web-push` as dependencies
+- **Logging**: use `logger.info/warn/error/stream/push/auth` (not `console.log`)
+- **Naming**: camelCase for variables/functions, UPPER_SNAKE for constants
+- **Async**: prefer `async/await`, avoid callbacks
+
+## Architecture Notes
+
+- OAuth sessions and push subscriptions are persisted as JSON files in `DATA_DIR`
+- Token validation caches results in memory (`tokenCache` Map) with 5min TTL
+- Dedup uses compound keys (`accountId:streamKey`) per stream type:
+  - `"user"` for home timeline / user notification streams
+  - `"user:notification"` for notification-only streams
+  - `"list:<listId>"` for list timeline streams
+- Polling runs on a single timer (`setTimeout` chain), not `setInterval`
+- WebSocket upgrade handles auth via query param `access_token` or `Authorization: Bearer` header
+
+## Git Workflow
+
+- `git commit` は適宜行う（变更がまとまったら都度コミットする）
+- コミットメッセージは変更内容を簡潔に記述する（例: `fix: ...`, `feat: ...`, `refactor: ...`）
+
+## Key Patterns
+
+- **Stream types**: `user`, `user:notification`, `list` (with `list` query param)
+- **Hollo API calls**: always use `HOLLO_URL` (public) or `HOLLO_INTERNAL_URL` (internal)
+- **Status sanitization**: `sanitizeStatus()` strips Hollo-specific fields before sending to clients
+- **File writes**: atomic via `.tmp` + `rename` pattern
