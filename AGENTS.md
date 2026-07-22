@@ -53,6 +53,9 @@ No test framework. Verify via:
   - `build.sh` は `package.json` の `version` を参照してイメージタグを決定する
   - 破壊的変更がなければ patch increment（`0.9.x` → `0.9.x+1`）
   - 新機能追加は minor increment（`0.9.x` → `0.10.0`）
+  - version bump 時は下記ファイルのバージョン表記も合わせて更新する:
+    - `README.md` — コンテナイメージのタグ
+    - `hollo-stream-proxy.yaml.sample` — Deployment のイメージタグ
 
 ## Key Patterns
 
