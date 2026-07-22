@@ -54,3 +54,14 @@ No test framework. Verify via:
 - **Hollo API calls**: always use `HOLLO_URL` (public) or `HOLLO_INTERNAL_URL` (internal)
 - **Status sanitization**: `sanitizeStatus()` strips Hollo-specific fields before sending to clients
 - **File writes**: atomic via `.tmp` + `rename` pattern
+
+## Reference Implementations
+
+- **Hollo source**: https://github.com/fedify-dev/hollo
+  - Timelines API: `src/api/v1/timelines.ts` (`GET /api/v1/timelines/list/:id`)
+  - Lists API: `src/api/v1/lists.ts`
+- **Mastodon streaming (Node.js)**: https://github.com/mastodon/mastodon/tree/main/streaming
+  - Main entry: `streaming/index.js`
+  - Request handler: `streaming/handler.js`
+  - Worker: `streaming/worker.js`
+- **Mastodon push notifications**: https://github.com/mastodon/mastodon/blob/main/app/workers/web_push_notification_worker.rb
