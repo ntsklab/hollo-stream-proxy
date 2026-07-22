@@ -351,6 +351,26 @@ async function fetchHomeTimelineAPI(accessToken, sinceId = null) {
   return { statuses, latestId };
 }
 
+async function fetchListTimelineAPI(accessToken, listId, sinceId = null) {
+  const params = new URLSearchParams({ limit: "40" });
+  if (sinceId) params.set("since_id", sinceId);
+
+  const res = await fetch(
+    `${HOLLO_URL}/api/v1/timelines/list/${listId}?${params}`,
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+  );
+
+  if (!res.ok) {
+    logger.error("list timeline API error", { status: res.status, listId });
+    return { statuses: [], latestId: null };
+  }
+
+  const statuses = await res.json();
+  const latestId = statuses.length > 0 ? statuses[0].id : null;
+
+  return { statuses, latestId };
+}
+
 async function fetchInstanceAPI(req, apiVersion = "v1") {
   const res = await fetch(`${HOLLO_INTERNAL_URL}/api/${apiVersion}/instance`, {
     headers: { Accept: "application/json" },
@@ -698,15 +718,23 @@ server.on("upgrade", async (req, socket, head) => {
   const tokenFromHeader = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : null;
   const token = tokenFromQuery || tokenFromHeader;
   const stream = url.searchParams.get("stream") || "user";
-  
+  const listId = stream === "list" ? url.searchParams.get("list") : null;
+
   logger.stream("upgrade request", {
     ua: req.headers["user-agent"],
     tokenFrom: tokenFromQuery ? "query" : tokenFromHeader ? "header" : "none",
     stream,
+    listId,
   });
   
   if (!token) {
     socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+    socket.destroy();
+    return;
+  }
+
+  if (stream === "list" && !listId) {
+    socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
     socket.destroy();
     return;
   }
@@ -721,7 +749,7 @@ server.on("upgrade", async (req, socket, head) => {
   const account = tokenInfo.accountOwnerId;
   
   wss.handleUpgrade(req, socket, head, (ws) => {
-    const streamEntry = { ws, stream, initialized: false, userAgent: req.headers["user-agent"] || "" };
+    const streamEntry = { ws, stream, listId, initialized: false, userAgent: req.headers["user-agent"] || "" };
     
     if (!activeStreams.has(account)) {
       activeStreams.set(account, new Set());
@@ -737,17 +765,18 @@ server.on("upgrade", async (req, socket, head) => {
       logger.stream("disconnected", { account });
     });
     
-    logger.stream("connected", { account, stream });
+    logger.stream("connected", { account, stream, listId });
     startPolling();
   });
 });
 
-function markNotificationSent(accountOwnerId, notificationId) {
+function markNotificationSent(accountOwnerId, notificationId, streamKey) {
+  const compoundKey = `${accountOwnerId}:${streamKey}`;
   const now = Date.now();
-  if (!recentlySentNotifications.has(accountOwnerId)) {
-    recentlySentNotifications.set(accountOwnerId, new Map());
+  if (!recentlySentNotifications.has(compoundKey)) {
+    recentlySentNotifications.set(compoundKey, new Map());
   }
-  const map = recentlySentNotifications.get(accountOwnerId);
+  const map = recentlySentNotifications.get(compoundKey);
   for (const [id, ts] of map.entries()) {
     if (now - ts > DEDUP_WINDOW_MS) map.delete(id);
   }
@@ -756,11 +785,12 @@ function markNotificationSent(accountOwnerId, notificationId) {
   return false;
 }
 
-function markTlPostSent(accountOwnerId, postId) {
-  if (!sentTlPosts.has(accountOwnerId)) {
-    sentTlPosts.set(accountOwnerId, new Set());
+function markTlPostSent(accountOwnerId, postId, streamKey) {
+  const compoundKey = `${accountOwnerId}:${streamKey}`;
+  if (!sentTlPosts.has(compoundKey)) {
+    sentTlPosts.set(compoundKey, new Set());
   }
-  const set = sentTlPosts.get(accountOwnerId);
+  const set = sentTlPosts.get(compoundKey);
   if (set.has(String(postId))) return true;
   set.add(String(postId));
   return false;
@@ -842,6 +872,10 @@ function startPolling() {
       const hasTimelineStream = streams && [...streams].some(
         (s) => s.stream === "user",
       );
+      const listStreams = streams
+        ? [...streams].filter((s) => s.stream === "list" && s.listId)
+        : [];
+      const listIds = [...new Set(listStreams.map((s) => s.listId))];
       
       // Get access token from OAuth sessions (補助情報)
       const sessions = await listOAuthSessions();
@@ -871,32 +905,28 @@ function startPolling() {
               let wsSent = 0;
               let wsSkipped = 0;
               let pushSent = 0;
-              let pushSkipped = 0;
               const subs = pushAccounts.has(accountOwnerId)
                 ? await loadSubscriptions(accountOwnerId)
                 : [];
               
               for (const n of notifications) {
-                if (markNotificationSent(accountOwnerId, String(n.id))) {
-                  wsSkipped++;
-                  pushSkipped++;
-                  continue;
-                }
-                
                 const sanitized = sanitizeNotification(n);
-                
+
                 for (const s of streams || []) {
-                  if (
-                    s.ws.readyState === 1 &&
-                    (s.stream === "user" || s.stream === "user:notification")
-                  ) {
-                    const eventJson = JSON.stringify({
-                      stream: [s.stream],
-                      event: "notification",
-                      payload: JSON.stringify(sanitized),
-                    });
-                    try { s.ws.send(eventJson); wsSent++; } catch (_) {}
+                  if (s.ws.readyState !== 1) continue;
+                  if (s.stream !== "user" && s.stream !== "user:notification") continue;
+
+                  if (markNotificationSent(accountOwnerId, String(n.id), s.stream)) {
+                    wsSkipped++;
+                    continue;
                   }
+
+                  const eventJson = JSON.stringify({
+                    stream: [s.stream],
+                    event: "notification",
+                    payload: JSON.stringify(sanitized),
+                  });
+                  try { s.ws.send(eventJson); wsSent++; } catch (_) {}
                 }
                 
                 if (subs.length > 0) {
@@ -927,9 +957,9 @@ function startPolling() {
                   fetched: notifications.length,
                 });
               }
-              if (pushSent > 0 || pushSkipped > 0) {
+              if (pushSent > 0) {
                 logger.push("notification", {
-                  account: accountOwnerId, sent: pushSent, skipped: pushSkipped,
+                  account: accountOwnerId, sent: pushSent,
                   fetched: notifications.length,
                 });
               }
@@ -961,7 +991,7 @@ function startPolling() {
               let skipped = 0;
 
               for (const status of statuses.reverse()) {
-                if (markTlPostSent(accountOwnerId, String(status.id))) {
+                if (markTlPostSent(accountOwnerId, String(status.id), "user")) {
                   skipped++;
                   continue;
                 }
@@ -988,6 +1018,55 @@ function startPolling() {
         } catch (err) {
           logger.error("timeline poll error", {
             account: accountOwnerId, error: err.message,
+          });
+        }
+      }
+
+      // List Timelines
+      for (const lid of listIds) {
+        try {
+          const sinceId = tlMaxIds.get(`list:${lid}`) || null;
+          const { statuses, latestId } = await fetchListTimelineAPI(accessToken, lid, sinceId);
+
+          if (statuses.length > 0) {
+            if (latestId) tlMaxIds.set(`list:${lid}`, latestId);
+
+            if (!sinceId) {
+              logger.stream("list timeline checkpoint set", {
+                account: accountOwnerId, listId: lid, latestId, count: statuses.length,
+              });
+            } else {
+              let sent = 0;
+              let skipped = 0;
+
+              for (const status of statuses.reverse()) {
+                if (markTlPostSent(accountOwnerId, String(status.id), `list:${lid}`)) {
+                  skipped++;
+                  continue;
+                }
+
+                for (const s of listStreams) {
+                  if (s.listId === lid && s.ws.readyState === 1) {
+                    const eventJson = JSON.stringify({
+                      stream: ["list"],
+                      event: "update",
+                      payload: JSON.stringify(sanitizeStatus(status)),
+                    });
+                    try { s.ws.send(eventJson); sent++; } catch (_) {}
+                  }
+                }
+              }
+
+              if (sent > 0 || skipped > 0) {
+                logger.stream("list update", {
+                  account: accountOwnerId, listId: lid, count: statuses.length, sent, skipped,
+                });
+              }
+            }
+          }
+        } catch (err) {
+          logger.error("list timeline poll error", {
+            account: accountOwnerId, listId: lid, error: err.message,
           });
         }
       }
