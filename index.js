@@ -975,9 +975,6 @@ function startPolling() {
           )
         : [];
       const listIds = [...new Set(listSubs.map((s) => s.listId))];
-      if (listIds.length > 0) {
-        logger.stream("list poll check", { account: accountOwnerId, listIds, streamCount: streams?.size || 0 });
-      }
       const listStreamEntries = streams
       
       // Get access token from OAuth sessions (補助情報)
@@ -1131,6 +1128,10 @@ function startPolling() {
         try {
           const sinceId = tlMaxIds.get(`list:${lid}`) || null;
           const { statuses, latestId } = await fetchListTimelineAPI(accessToken, lid, sinceId);
+
+          if (sinceId) {
+            logger.stream("list poll", { account: accountOwnerId, listId: lid, sinceId, fetched: statuses.length });
+          }
 
           if (statuses.length > 0) {
             if (latestId) tlMaxIds.set(`list:${lid}`, latestId);
