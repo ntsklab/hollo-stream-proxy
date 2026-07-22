@@ -100,6 +100,15 @@ DELETE /api/v1/push/subscription  — 購読解除
 
 `Authorization: Bearer <access_token>` 必須。
 
+購読時の `data.alerts` で以下の通知種別を制御できます。未指定の場合は `true`（有効）として扱われます。
+
+- `mention`, `status`, `reblog`, `favourite`, `follow`, `follow_request`, `poll`, `update`
+- `admin_sign_up`, `admin_report`, `severed_relationships`
+- `reaction`（Hollo の `emoji_reaction` 用）
+
+Hollo の `emoji_reaction` 通知は `reaction` または `favourite` が有効な場合に配信されます。
+配信ペイロードは `{ access_token, notification_id, notification_type, icon, title, body, notification }` の JSON 形式です。
+
 ### Instance API
 
 ```

@@ -250,10 +250,17 @@ async function saveSubscription(accountId, sub, alertsData, accessToken) {
     access_token: accessToken,
     alerts: {
       mention: alertsData.mention !== false,
+      status: alertsData.status !== false,
       reblog: alertsData.reblog !== false,
       favourite: alertsData.favourite !== false,
       follow: alertsData.follow !== false,
+      follow_request: alertsData.follow_request !== false,
       poll: alertsData.poll !== false,
+      update: alertsData.update !== false,
+      admin_sign_up: alertsData.admin_sign_up !== false,
+      admin_report: alertsData.admin_report !== false,
+      severed_relationships: alertsData.severed_relationships !== false,
+      reaction: alertsData.reaction !== false,
     },
     created_at: new Date().toISOString(),
   };
@@ -273,6 +280,11 @@ async function loadSubscription(accountId) {
   return subs && subs.length > 0 ? subs[0] : null;
 }
 
+async function loadSubscriptions(accountId) {
+  const data = await loadSubsFile();
+  return data.subscriptions[accountId] || [];
+}
+
 async function deleteSubscription(accountId) {
   const data = await loadSubsFile();
   delete data.subscriptions[accountId];
@@ -286,10 +298,17 @@ async function updateAlerts(accountId, alertsData) {
   for (const sub of subs) {
     sub.alerts = {
       mention: alertsData.mention !== false,
+      status: alertsData.status !== false,
       reblog: alertsData.reblog !== false,
       favourite: alertsData.favourite !== false,
       follow: alertsData.follow !== false,
+      follow_request: alertsData.follow_request !== false,
       poll: alertsData.poll !== false,
+      update: alertsData.update !== false,
+      admin_sign_up: alertsData.admin_sign_up !== false,
+      admin_report: alertsData.admin_report !== false,
+      severed_relationships: alertsData.severed_relationships !== false,
+      reaction: alertsData.reaction !== false,
     };
   }
   await saveSubsFile(data);
@@ -783,6 +802,29 @@ function sanitizeNotification(notification) {
   return sanitized;
 }
 
+function shouldSendPush(alerts, notification) {
+  const type = notification.type;
+  // Hollo の emoji_reaction は reaction / favourite アラートで制御
+  if (type === "emoji_reaction" || type === "reaction") {
+    return alerts.reaction !== false || alerts.favourite !== false;
+  }
+  const key = type.replace(/\./g, "_");
+  return alerts[key] !== false;
+}
+
+function buildPushPayload(notification, accessToken) {
+  const icon = notification.account?.avatar || notification.account?.avatar_static || "";
+  return {
+    access_token: accessToken,
+    notification_id: String(notification.id),
+    notification_type: notification.type,
+    icon,
+    title: "",
+    body: "",
+    notification,
+  };
+}
+
 let pollTimer = null;
 
 function startPolling() {
@@ -825,19 +867,25 @@ function startPolling() {
               logger.stream("notification checkpoint set", {
                 account: accountOwnerId, latestId, count: notifications.length,
               });
-            } else if (streams && streams.size > 0) {
+            } else {
               let wsSent = 0;
               let wsSkipped = 0;
+              let pushSent = 0;
+              let pushSkipped = 0;
+              const subs = pushAccounts.has(accountOwnerId)
+                ? await loadSubscriptions(accountOwnerId)
+                : [];
               
               for (const n of notifications) {
                 if (markNotificationSent(accountOwnerId, String(n.id))) {
                   wsSkipped++;
+                  pushSkipped++;
                   continue;
                 }
                 
                 const sanitized = sanitizeNotification(n);
                 
-                for (const s of streams) {
+                for (const s of streams || []) {
                   if (
                     s.ws.readyState === 1 &&
                     (s.stream === "user" || s.stream === "user:notification")
@@ -850,11 +898,38 @@ function startPolling() {
                     try { s.ws.send(eventJson); wsSent++; } catch (_) {}
                   }
                 }
+                
+                if (subs.length > 0) {
+                  const payload = buildPushPayload(sanitized, accessToken);
+                  let sentForNotification = 0;
+                  for (let i = subs.length - 1; i >= 0; i--) {
+                    const sub = subs[i];
+                    if (!shouldSendPush(sub.alerts, sanitized)) continue;
+                    
+                    const result = await sendPushNotification(sub, payload);
+                    if (result.removed) {
+                      await removePushSubscription(sub.endpoint);
+                      subs.splice(i, 1);
+                    } else if (result.ok) {
+                      sentForNotification++;
+                    }
+                  }
+                  pushSent += sentForNotification;
+                  if (subs.length === 0) {
+                    pushAccounts.delete(accountOwnerId);
+                  }
+                }
               }
               
               if (wsSent > 0 || wsSkipped > 0) {
                 logger.stream("notification", {
                   account: accountOwnerId, sent: wsSent, skipped: wsSkipped,
+                  fetched: notifications.length,
+                });
+              }
+              if (pushSent > 0 || pushSkipped > 0) {
+                logger.push("notification", {
+                  account: accountOwnerId, sent: pushSent, skipped: pushSkipped,
                   fetched: notifications.length,
                 });
               }
@@ -929,6 +1004,9 @@ function startPolling() {
 }
 
 async function sendPushNotification(sub, payload) {
+  if (!VAPID_PRIVATE_KEY) {
+    return { ok: false, code: null, message: "VAPID_PRIVATE_KEY not configured" };
+  }
   try {
     await webpush.sendNotification(
       { endpoint: sub.endpoint, keys: sub.keys },
@@ -947,10 +1025,24 @@ async function sendPushNotification(sub, payload) {
   }
 }
 
+async function loadExistingPushSubscriptions() {
+  const data = await loadSubsFile();
+  for (const accountId of Object.keys(data.subscriptions || {})) {
+    if (data.subscriptions[accountId].length > 0) {
+      pushAccounts.add(accountId);
+    }
+  }
+  if (pushAccounts.size > 0) {
+    logger.push("loaded existing subscriptions", { accounts: pushAccounts.size });
+  }
+}
+
 // ─ Start server ──────────────────────────────────────────────────────────
 // Start server after app registration
 registerApp().then(async () => {
   await loadTemplates();
+  await loadExistingPushSubscriptions();
+  if (pushAccounts.size > 0) startPolling();
   server.listen(PORT, () => {
     logger.info(`Hollo Stream Proxy listening on port ${PORT}`);
     logger.info(`Hollo URL: ${HOLLO_URL}`);
@@ -963,10 +1055,15 @@ registerApp().then(async () => {
 
 async function shutdown() {
   logger.info("shutting down...");
-  clearInterval(pollTimer);
-  await pool.end();
-  server.close();
-  process.exit(0);
+  clearTimeout(pollTimer);
+  const forceExit = setTimeout(() => {
+    logger.warn("forced shutdown: existing connections remain");
+    process.exit(1);
+  }, 5000);
+  server.close(() => {
+    clearTimeout(forceExit);
+    process.exit(0);
+  });
 }
 
 process.on("SIGINT", shutdown);
