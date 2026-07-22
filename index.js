@@ -1153,7 +1153,7 @@ function startPolling() {
                   const sub = s.subscriptions.get(`list:${lid}`);
                   if (sub && s.ws.readyState === 1) {
                     const eventJson = JSON.stringify({
-                      stream: ["list"],
+                      stream: ["list", lid],
                       event: "update",
                       payload: JSON.stringify(sanitizeStatus(status)),
                     });
@@ -1291,7 +1291,7 @@ function startPolling() {
                 for (const s of applicableStreams) {
                   if (s.ws.readyState === 1) {
                     const eventJson = JSON.stringify({
-                      stream: ["hashtag"],
+                      stream: [streamKey, htTag],
                       event: "update",
                       payload: JSON.stringify(sanitizeStatus(status)),
                     });
