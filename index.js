@@ -1112,6 +1112,19 @@ function startPolling() {
                     try { s.ws.send(eventJson); sent++; } catch (_) {}
                   }
                 }
+
+                // Also send list timeline updates to user stream for clients
+                // that only connect via stream=user (e.g. thedesk)
+                for (const s of streams) {
+                  if (s.stream === "user" && s.ws.readyState === 1) {
+                    const eventJson = JSON.stringify({
+                      stream: ["user"],
+                      event: "update",
+                      payload: JSON.stringify(sanitizeStatus(status)),
+                    });
+                    try { s.ws.send(eventJson); } catch (_) {}
+                  }
+                }
               }
 
               if (sent > 0 || skipped > 0) {
@@ -1172,6 +1185,17 @@ function startPolling() {
                       payload: JSON.stringify(sanitizeStatus(status)),
                     });
                     try { s.ws.send(eventJson); sent++; } catch (_) {}
+                  }
+                }
+
+                for (const s of streams) {
+                  if (s.stream === "user" && s.ws.readyState === 1) {
+                    const eventJson = JSON.stringify({
+                      stream: ["user"],
+                      event: "update",
+                      payload: JSON.stringify(sanitizeStatus(status)),
+                    });
+                    try { s.ws.send(eventJson); } catch (_) {}
                   }
                 }
               }
@@ -1236,6 +1260,17 @@ function startPolling() {
                       payload: JSON.stringify(sanitizeStatus(status)),
                     });
                     try { s.ws.send(eventJson); sent++; } catch (_) {}
+                  }
+                }
+
+                for (const s of streams) {
+                  if (s.stream === "user" && s.ws.readyState === 1) {
+                    const eventJson = JSON.stringify({
+                      stream: ["user"],
+                      event: "update",
+                      payload: JSON.stringify(sanitizeStatus(status)),
+                    });
+                    try { s.ws.send(eventJson); } catch (_) {}
                   }
                 }
               }
