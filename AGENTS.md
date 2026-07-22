@@ -37,9 +37,11 @@ No test framework. Verify via:
 - OAuth sessions and push subscriptions are persisted as JSON files in `DATA_DIR`
 - Token validation caches results in memory (`tokenCache` Map) with 5min TTL
 - Dedup uses compound keys (`accountId:streamKey`) per stream type:
-  - `"user"` for home timeline / user notification streams
-  - `"user:notification"` for notification-only streams
-  - `"list:<listId>"` for list timeline streams
+  - `\"user\"` for home timeline / user notification streams
+  - `\"user:notification\"` for notification-only streams
+  - `\"list:<listId>\"` for list timeline streams
+  - `\"public\"`, `\"public:local\"`, `\"public:remote\"` for public timelines
+  - `\"hashtag:<tag>\"`, `\"hashtag:<tag>:local\"` for hashtag timelines
 - Polling runs on a single timer (`setTimeout` chain), not `setInterval`
 - WebSocket upgrade handles auth via query param `access_token` or `Authorization: Bearer` header
 
@@ -50,7 +52,7 @@ No test framework. Verify via:
 
 ## Key Patterns
 
-- **Stream types**: `user`, `user:notification`, `list` (with `list` query param)
+- **Stream types**: `user`, `user:notification`, `list` (with `list` query param), `public`, `public:local`, `public:remote`, `hashtag`, `hashtag:local` (with `tag` query param)
 - **Hollo API calls**: always use `HOLLO_URL` (public) or `HOLLO_INTERNAL_URL` (internal)
 - **Status sanitization**: `sanitizeStatus()` strips Hollo-specific fields before sending to clients
 - **File writes**: atomic via `.tmp` + `rename` pattern
