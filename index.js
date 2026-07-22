@@ -418,6 +418,47 @@ async function fetchInstanceAPI(req, apiVersion = "v1") {
   return data;
 }
 
+async function fetchPublicTimelineAPI(accessToken, { local = false, remote = false, sinceId = null } = {}) {
+  const params = new URLSearchParams({ limit: "40" });
+  if (local) params.set("local", "true");
+  if (remote) params.set("remote", "true");
+  if (sinceId) params.set("since_id", sinceId);
+
+  const res = await fetch(
+    `${HOLLO_URL}/api/v1/timelines/public?${params}`,
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+  );
+
+  if (!res.ok) {
+    logger.error("public timeline API error", { status: res.status, local, remote });
+    return { statuses: [], latestId: null };
+  }
+
+  const statuses = await res.json();
+  const latestId = statuses.length > 0 ? statuses[0].id : null;
+  return { statuses, latestId };
+}
+
+async function fetchHashtagTimelineAPI(accessToken, tag, { local = false, sinceId = null } = {}) {
+  const params = new URLSearchParams({ limit: "40" });
+  if (local) params.set("local", "true");
+  if (sinceId) params.set("since_id", sinceId);
+
+  const res = await fetch(
+    `${HOLLO_URL}/api/v1/timelines/tag/${encodeURIComponent(tag)}?${params}`,
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+  );
+
+  if (!res.ok) {
+    logger.error("hashtag timeline API error", { status: res.status, tag, local });
+    return { statuses: [], latestId: null };
+  }
+
+  const statuses = await res.json();
+  const latestId = statuses.length > 0 ? statuses[0].id : null;
+  return { statuses, latestId };
+}
+
 async function fetchNotificationsAPI(accessToken, sinceId = null) {
   const params = new URLSearchParams({ limit: "30" });
   if (sinceId) params.set("since_id", sinceId);
@@ -719,6 +760,9 @@ server.on("upgrade", async (req, socket, head) => {
   const token = tokenFromQuery || tokenFromHeader;
   const stream = url.searchParams.get("stream") || "user";
   const listId = stream === "list" ? url.searchParams.get("list") : null;
+  const tag = (stream === "hashtag" || stream === "hashtag:local")
+    ? url.searchParams.get("tag")
+    : null;
 
   logger.stream("upgrade request", {
     ua: req.headers["user-agent"],
@@ -738,6 +782,19 @@ server.on("upgrade", async (req, socket, head) => {
     socket.destroy();
     return;
   }
+
+  if ((stream === "hashtag" || stream === "hashtag:local") && !tag) {
+    socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
+    socket.destroy();
+    return;
+  }
+
+  const validStreams = ["user", "user:notification", "list", "public", "public:local", "public:remote", "hashtag", "hashtag:local"];
+  if (!validStreams.includes(stream)) {
+    socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
+    socket.destroy();
+    return;
+  }
   
   const tokenInfo = await verifyToken(token);
   if (!tokenInfo?.accountOwnerId) {
@@ -749,7 +806,7 @@ server.on("upgrade", async (req, socket, head) => {
   const account = tokenInfo.accountOwnerId;
   
   wss.handleUpgrade(req, socket, head, (ws) => {
-    const streamEntry = { ws, stream, listId, initialized: false, userAgent: req.headers["user-agent"] || "" };
+    const streamEntry = { ws, stream, listId, tag, initialized: false, userAgent: req.headers["user-agent"] || "" };
     
     if (!activeStreams.has(account)) {
       activeStreams.set(account, new Set());
@@ -1067,6 +1124,132 @@ function startPolling() {
         } catch (err) {
           logger.error("list timeline poll error", {
             account: accountOwnerId, listId: lid, error: err.message,
+          });
+        }
+      }
+
+      // Public timelines
+      const publicStreams = streams
+        ? [...streams].filter((s) =>
+            s.stream === "public" ||
+            s.stream === "public:local" ||
+            s.stream === "public:remote")
+        : [];
+      const publicVariants = new Map();
+      for (const s of publicStreams) {
+        publicVariants.set(s.stream, { local: s.stream === "public:local", remote: s.stream === "public:remote" });
+      }
+      for (const [streamKey, { local, remote }] of publicVariants) {
+        try {
+          const sinceId = tlMaxIds.get(`${accountOwnerId}:${streamKey}`) || null;
+          const { statuses, latestId } = await fetchPublicTimelineAPI(accessToken, { local, remote, sinceId });
+
+          if (statuses.length > 0) {
+            if (latestId) tlMaxIds.set(`${accountOwnerId}:${streamKey}`, latestId);
+
+            if (!sinceId) {
+              logger.stream("public timeline checkpoint set", {
+                account: accountOwnerId, stream: streamKey, latestId, count: statuses.length,
+              });
+            } else {
+              let sent = 0;
+              let skipped = 0;
+
+              for (const status of statuses.reverse()) {
+                if (markTlPostSent(accountOwnerId, String(status.id), streamKey)) {
+                  skipped++;
+                  continue;
+                }
+
+                const applicableStreams = streams
+                  ? [...streams].filter((s) => s.stream === streamKey)
+                  : [];
+                for (const s of applicableStreams) {
+                  if (s.ws.readyState === 1) {
+                    const eventJson = JSON.stringify({
+                      stream: [streamKey],
+                      event: "update",
+                      payload: JSON.stringify(sanitizeStatus(status)),
+                    });
+                    try { s.ws.send(eventJson); sent++; } catch (_) {}
+                  }
+                }
+              }
+
+              if (sent > 0 || skipped > 0) {
+                logger.stream("public timeline", {
+                  account: accountOwnerId, stream: streamKey, sent, skipped, fetched: statuses.length,
+                });
+              }
+            }
+          }
+        } catch (err) {
+          logger.error("public timeline poll error", {
+            account: accountOwnerId, stream: streamKey, error: err.message,
+          });
+        }
+      }
+
+      // Hashtag timelines
+      const hashtagStreams = streams
+        ? [...streams].filter((s) =>
+            (s.stream === "hashtag" || s.stream === "hashtag:local") && s.tag)
+        : [];
+      const hashtagGroups = new Map();
+      for (const s of hashtagStreams) {
+        const key = `${s.stream}:${s.tag}`;
+        if (!hashtagGroups.has(key)) {
+          hashtagGroups.set(key, { stream: s.stream, tag: s.tag, local: s.stream === "hashtag:local" });
+        }
+      }
+      for (const [key, { stream: streamKey, tag: htTag, local }] of hashtagGroups) {
+        try {
+          const sinceId = tlMaxIds.get(`${accountOwnerId}:hashtag:${htTag}${local ? ":local" : ""}`) || null;
+          const { statuses, latestId } = await fetchHashtagTimelineAPI(accessToken, htTag, { local, sinceId });
+
+          if (statuses.length > 0) {
+            const dedupKey = `${accountOwnerId}:hashtag:${htTag}${local ? ":local" : ""}`;
+            if (latestId) tlMaxIds.set(dedupKey, latestId);
+
+            if (!sinceId) {
+              logger.stream("hashtag timeline checkpoint set", {
+                account: accountOwnerId, tag: htTag, local, latestId, count: statuses.length,
+              });
+            } else {
+              let sent = 0;
+              let skipped = 0;
+
+              for (const status of statuses.reverse()) {
+                if (markTlPostSent(accountOwnerId, String(status.id), dedupKey)) {
+                  skipped++;
+                  continue;
+                }
+
+                const applicableStreams = streams
+                  ? [...streams].filter((s) => s.stream === streamKey && s.tag === htTag)
+                  : [];
+                for (const s of applicableStreams) {
+                  if (s.ws.readyState === 1) {
+                    const eventJson = JSON.stringify({
+                      stream: ["hashtag"],
+                      event: "update",
+                      payload: JSON.stringify(sanitizeStatus(status)),
+                    });
+                    try { s.ws.send(eventJson); sent++; } catch (_) {}
+                  }
+                }
+              }
+
+              if (sent > 0 || skipped > 0) {
+                logger.stream("hashtag timeline", {
+                  account: accountOwnerId, tag: htTag, local, sent, skipped, fetched: statuses.length,
+                });
+              }
+            }
+          }
+        } catch (err) {
+          logger.error("hashtag timeline poll error", {
+            account: accountOwnerId, tag: htTag, local, error: err.message,
           });
         }
       }
