@@ -1,8 +1,8 @@
 # Hollo Stream Proxy
 
-[Hollo](https://github.com/fedify-dev/hollo) 用の Streaming / WebSocket & WebPush プロキシです。
+[Hollo](https://github.com/fedify-dev/hollo) 用の Streaming / WebSocket & WebPush を代替するProxy実装
 
-Push 通知および Streaming 非対応の Hollo で、リアルタイム通知を実現します。
+Push 通知および Streaming 非対応の Hollo で、擬似リアルタイム通知とTL更新を実現します。
 また Instance API の補完（`urls.streaming_api` 注入）と Filters エンドポイントも提供します。
 
 ## 機能
@@ -40,7 +40,7 @@ Push 通知および Streaming 非対応の Hollo で、リアルタイム通知
 ## コンテナイメージ
 
 ```
-nrt.vultrcr.com/ntlab1/hollo-stream-proxy:0.9.17
+nrt.vultrcr.com/ntlab1/hollo-stream-proxy:0.9.18
 ```
 
 ## デプロイ
