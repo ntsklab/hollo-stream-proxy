@@ -1129,10 +1129,6 @@ function startPolling() {
           const sinceId = tlMaxIds.get(`list:${lid}`) || null;
           const { statuses, latestId } = await fetchListTimelineAPI(accessToken, lid, sinceId);
 
-          if (sinceId) {
-            logger.stream("list poll", { account: accountOwnerId, listId: lid, sinceId, fetched: statuses.length });
-          }
-
           if (statuses.length > 0) {
             if (latestId) tlMaxIds.set(`list:${lid}`, latestId);
 
