@@ -34,6 +34,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Extract version from package.json
+        id: pkg
+        run: |
+          VERSION=$(jq -r '.version' package.json)
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
       - name: Docker metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -42,6 +48,7 @@ jobs:
           tags: |
             type=ref,event=tag
             type=sha,prefix=,format=short
+            type=raw,value=${{ steps.pkg.outputs.version }}
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' }}
 
       - uses: docker/build-push-action@v6
