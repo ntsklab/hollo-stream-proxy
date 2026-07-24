@@ -738,6 +738,101 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  // ── SSE Streaming (HTTP long-lived) ─────────────────────────────────
+  if (req.method === "GET" && path.startsWith("/api/v1/streaming/")) {
+    const ssePath = path.replace("/api/v1/streaming/", "");
+    const tokenFromQuery = url.searchParams.get("access_token");
+    const authHeader = req.headers.authorization || "";
+    const tokenFromHeader = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : null;
+    const token = tokenFromQuery || tokenFromHeader;
+
+    if (!token) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Unauthorized" }));
+      return;
+    }
+
+    const tokenInfo = await verifyToken(token);
+    if (!tokenInfo?.accountOwnerId) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Unauthorized" }));
+      return;
+    }
+
+    let stream, params;
+    if (ssePath === "user") {
+      stream = "user";
+      params = {};
+    } else if (ssePath === "user/notification") {
+      stream = "user:notification";
+      params = {};
+    } else if (ssePath === "list") {
+      const listId = url.searchParams.get("list");
+      if (!listId) { res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Missing list parameter" })); return; }
+      stream = "list";
+      params = { list: listId };
+    } else if (ssePath === "public" || ssePath === "public/local" || ssePath === "public/remote") {
+      stream = ssePath.replace("/", ":");
+      params = {};
+    } else if (ssePath === "hashtag" || ssePath === "hashtag/local") {
+      const tag = url.searchParams.get("tag");
+      if (!tag) { res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Missing tag parameter" })); return; }
+      stream = ssePath.replace("/", ":");
+      params = { tag };
+    } else if (ssePath === "direct") {
+      stream = "direct";
+      params = {};
+    } else {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Unknown stream" }));
+      return;
+    }
+
+    const account = tokenInfo.accountOwnerId;
+    const subListId = stream === "list" ? params.list : null;
+    const subTag = (stream === "hashtag" || stream === "hashtag:local") ? params.tag : null;
+    const key = subListId ? `list:${subListId}` : subTag ? `${stream}:${subTag}` : stream;
+    const subscriptions = new Map();
+    subscriptions.set(key, { stream, listId: subListId, tag: subTag });
+
+    const sseEntry = { ws: null, subscriptions, initialized: false, userAgent: req.headers["user-agent"] || "", sse: true };
+
+    sseEntry.send = (eventJson) => {
+      try {
+        const parsed = JSON.parse(eventJson);
+        const event = parsed.event;
+        const payload = parsed.payload;
+        res.write(`event: ${event}\n`);
+        res.write(`data: ${payload}\n\n`);
+      } catch {}
+    };
+
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "private, no-store",
+      "Connection": "keep-alive",
+    });
+    res.write(":ok\n\n");
+
+    if (!activeStreams.has(account)) {
+      activeStreams.set(account, new Set());
+    }
+    activeStreams.get(account).add(sseEntry);
+
+    req.on("close", () => {
+      const streams = activeStreams.get(account);
+      if (streams) {
+        streams.delete(sseEntry);
+        if (streams.size === 0) activeStreams.delete(account);
+      }
+      logger.stream("sse disconnected", { account });
+    });
+
+    logger.stream("sse connected", { account, stream, listId: subListId, tag: subTag });
+    startPolling();
+    return;
+  }
+
   // ── Default: 404 ─────────────────────────────────────────────────────
   res.writeHead(404, { "Content-Type": "application/json" });
   res.end(JSON.stringify({ error: "Not found" }));
@@ -1013,7 +1108,7 @@ function startPolling() {
                 const sanitized = sanitizeNotification(n);
 
                 for (const s of streams || []) {
-                  if (s.ws.readyState !== 1) continue;
+                  if (!s.sse && s.ws?.readyState !== 1) continue;
                   if (!s.subscriptions.has("user") && !s.subscriptions.has("user:notification")) continue;
 
                   const notifStream = s.subscriptions.has("user:notification") ? "user:notification" : "user";
@@ -1027,7 +1122,8 @@ function startPolling() {
                     event: "notification",
                     payload: JSON.stringify(sanitized),
                   });
-                  try { s.ws.send(eventJson); wsSent++; } catch (_) {}
+                  if (s.sse) { s.send(eventJson); wsSent++; }
+                  else { try { s.ws.send(eventJson); wsSent++; } catch (_) {} }
                 }
                 
                 if (subs.length > 0) {
@@ -1098,13 +1194,14 @@ function startPolling() {
                 }
 
                 for (const s of streams) {
-                  if (s.subscriptions.has("user") && s.ws.readyState === 1) {
+                  if (s.subscriptions.has("user") && (s.sse || s.ws?.readyState === 1)) {
                     const eventJson = JSON.stringify({
                       stream: ["user"],
                       event: "update",
                       payload: JSON.stringify(sanitizeStatus(status)),
                     });
-                    try { s.ws.send(eventJson); sent++; } catch (_) {}
+                    if (s.sse) { s.send(eventJson); sent++; }
+                    else { try { s.ws.send(eventJson); sent++; } catch (_) {} }
                   }
                 }
               }
@@ -1148,13 +1245,14 @@ function startPolling() {
 
                 for (const s of streams) {
                   const sub = s.subscriptions.get(`list:${lid}`);
-                  if (sub && s.ws.readyState === 1) {
+                  if (sub && (s.sse || s.ws?.readyState === 1)) {
                     const eventJson = JSON.stringify({
                       stream: ["list", lid],
                       event: "update",
                       payload: JSON.stringify(sanitizeStatus(status)),
                     });
-                    try { s.ws.send(eventJson); sent++; } catch (_) {}
+                    if (s.sse) { s.send(eventJson); sent++; }
+                    else { try { s.ws.send(eventJson); sent++; } catch (_) {} }
                   }
                 }
               }
@@ -1214,13 +1312,14 @@ function startPolling() {
                   ? [...streams].filter((s) => s.subscriptions.has(streamKey))
                   : [];
                 for (const s of applicableStreams) {
-                  if (s.ws.readyState === 1) {
+                  if (s.sse || s.ws?.readyState === 1) {
                     const eventJson = JSON.stringify({
                       stream: [streamKey],
                       event: "update",
                       payload: JSON.stringify(sanitizeStatus(status)),
                     });
-                    try { s.ws.send(eventJson); sent++; } catch (_) {}
+                    if (s.sse) { s.send(eventJson); sent++; }
+                    else { try { s.ws.send(eventJson); sent++; } catch (_) {} }
                   }
                 }
               }
@@ -1286,13 +1385,14 @@ function startPolling() {
                     })
                   : [];
                 for (const s of applicableStreams) {
-                  if (s.ws.readyState === 1) {
+                  if (s.sse || s.ws?.readyState === 1) {
                     const eventJson = JSON.stringify({
                       stream: [streamKey, htTag],
                       event: "update",
                       payload: JSON.stringify(sanitizeStatus(status)),
                     });
-                    try { s.ws.send(eventJson); sent++; } catch (_) {}
+                    if (s.sse) { s.send(eventJson); sent++; }
+                    else { try { s.ws.send(eventJson); sent++; } catch (_) {} }
                   }
                 }
               }
