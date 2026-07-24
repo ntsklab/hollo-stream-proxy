@@ -760,7 +760,7 @@ const server = createServer(async (req, res) => {
     }
 
     let stream, params;
-    if (ssePath === "user") {
+    if (ssePath === "" || ssePath === "user") {
       stream = "user";
       params = {};
     } else if (ssePath === "user/notification") {
