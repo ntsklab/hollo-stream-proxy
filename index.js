@@ -168,9 +168,13 @@ async function verifyToken(token) {
   }
 
   try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15_000);
     const res = await fetch(`${HOLLO_INTERNAL_URL}/api/v1/accounts/verify_credentials`, {
       headers: { Authorization: `Bearer ${token}` },
+      signal: controller.signal,
     });
+    clearTimeout(timeout);
     if (!res.ok) {
       tokenCache.set(token, { valid: false, expiresAt: Date.now() + TOKEN_CACHE_NEG_TTL_MS });
       return null;
@@ -840,6 +844,9 @@ const server = createServer(async (req, res) => {
 
 // ── WebSocket server ────────────────────────────────────────────────────
 const wss = new WebSocketServer({ noServer: true });
+wss.on("error", (err) => {
+  logger.error("websocket server error", { error: err.message });
+});
 const activeStreams = new Map();
 const pushAccounts = new Set();
 const recentlySentNotifications = new Map();
@@ -848,7 +855,15 @@ const tlMaxIds = new Map();
 const DEDUP_WINDOW_MS = 60_000;
 
 server.on("upgrade", async (req, socket, head) => {
-  const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  let url;
+  try {
+    url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  } catch (err) {
+    logger.error("ws upgrade: invalid url", { url: req.url, error: err.message });
+    socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+    return;
+  }
+
   const tokenFromQuery = url.searchParams.get("access_token");
   const authHeader = req.headers.authorization || "";
   const tokenFromHeader = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : null;
@@ -865,101 +880,115 @@ server.on("upgrade", async (req, socket, head) => {
     stream,
     listId,
   });
-  
+
   if (!token) {
-    socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
-    socket.destroy();
+    socket.end("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
     return;
   }
 
   if (stream === "list" && !listId) {
-    socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
-    socket.destroy();
+    socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
     return;
   }
 
   if ((stream === "hashtag" || stream === "hashtag:local") && !tag) {
-    socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
-    socket.destroy();
+    socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
     return;
   }
 
   const validStreams = ["user", "user:notification", "list", "public", "public:local", "public:remote", "hashtag", "hashtag:local"];
   if (!validStreams.includes(stream)) {
-    socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
-    socket.destroy();
+    socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
     return;
   }
-  
-  const tokenInfo = await verifyToken(token);
+
+  let tokenInfo;
+  try {
+    tokenInfo = await verifyToken(token);
+  } catch (err) {
+    logger.error("ws upgrade: token verification error", { error: err.message });
+    socket.end("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+    return;
+  }
+
   if (!tokenInfo?.accountOwnerId) {
-    socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
-    socket.destroy();
+    socket.end("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
     return;
   }
-  
+
   const account = tokenInfo.accountOwnerId;
-  
-  wss.handleUpgrade(req, socket, head, (ws) => {
-    const subscriptions = new Map();
 
-    function addSubscription(subStream, params = {}) {
-      const subListId = subStream === "list" ? params.list : null;
-      const subTag = (subStream === "hashtag" || subStream === "hashtag:local") ? params.tag : null;
-      const key = subListId ? `list:${subListId}` : subTag ? `${subStream}:${subTag}` : subStream;
-      subscriptions.set(key, { stream: subStream, listId: subListId, tag: subTag });
-      logger.stream("subscribed", { account, stream: subStream, listId: subListId, tag: subTag });
-    }
+  try {
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      const subscriptions = new Map();
 
-    function removeSubscription(subStream, params = {}) {
-      const subListId = subStream === "list" ? params.list : null;
-      const subTag = (subStream === "hashtag" || subStream === "hashtag:local") ? params.tag : null;
-      const key = subListId ? `list:${subListId}` : subTag ? `${subStream}:${subTag}` : subStream;
-      subscriptions.delete(key);
-      logger.stream("unsubscribed", { account, stream: subStream, listId: subListId, tag: subTag });
-    }
-
-    function hasSubscription(subStream, listIdOrTag = null) {
-      if (subStream === "list") return subscriptions.has(`list:${listIdOrTag}`);
-      if (subStream === "hashtag" || subStream === "hashtag:local") return subscriptions.has(`${subStream}:${listIdOrTag}`);
-      return subscriptions.has(subStream);
-    }
-
-    ws.on("message", (data, isBinary) => {
-      if (isBinary) return;
-      let json;
-      try { json = JSON.parse(data.toString("utf8")); } catch { return; }
-      if (!json || typeof json !== "object") return;
-      const { type, stream: msgStream, ...params } = json;
-      if (type === "subscribe" && typeof msgStream === "string") {
-        addSubscription(msgStream, params);
-        startPolling();
-      } else if (type === "unsubscribe" && typeof msgStream === "string") {
-        removeSubscription(msgStream, params);
+      function addSubscription(subStream, params = {}) {
+        const subListId = subStream === "list" ? params.list : null;
+        const subTag = (subStream === "hashtag" || subStream === "hashtag:local") ? params.tag : null;
+        const key = subListId ? `list:${subListId}` : subTag ? `${subStream}:${subTag}` : subStream;
+        subscriptions.set(key, { stream: subStream, listId: subListId, tag: subTag });
+        logger.stream("subscribed", { account, stream: subStream, listId: subListId, tag: subTag });
       }
-    });
 
-    const streamEntry = { ws, subscriptions, initialized: false, userAgent: req.headers["user-agent"] || "" };
-
-    if (!activeStreams.has(account)) {
-      activeStreams.set(account, new Set());
-    }
-    activeStreams.get(account).add(streamEntry);
-
-    ws.on("close", () => {
-      const streams = activeStreams.get(account);
-      if (streams) {
-        streams.delete(streamEntry);
-        if (streams.size === 0) activeStreams.delete(account);
+      function removeSubscription(subStream, params = {}) {
+        const subListId = subStream === "list" ? params.list : null;
+        const subTag = (subStream === "hashtag" || subStream === "hashtag:local") ? params.tag : null;
+        const key = subListId ? `list:${subListId}` : subTag ? `${subStream}:${subTag}` : subStream;
+        subscriptions.delete(key);
+        logger.stream("unsubscribed", { account, stream: subStream, listId: subListId, tag: subTag });
       }
-      logger.stream("disconnected", { account });
+
+      function hasSubscription(subStream, listIdOrTag = null) {
+        if (subStream === "list") return subscriptions.has(`list:${listIdOrTag}`);
+        if (subStream === "hashtag" || subStream === "hashtag:local") return subscriptions.has(`${subStream}:${listIdOrTag}`);
+        return subscriptions.has(subStream);
+      }
+
+      ws.on("message", (data, isBinary) => {
+        if (isBinary) return;
+        let json;
+        try { json = JSON.parse(data.toString("utf8")); } catch { return; }
+        if (!json || typeof json !== "object") return;
+        const { type, stream: msgStream, ...params } = json;
+        if (type === "subscribe" && typeof msgStream === "string") {
+          addSubscription(msgStream, params);
+          startPolling();
+        } else if (type === "unsubscribe" && typeof msgStream === "string") {
+          removeSubscription(msgStream, params);
+        }
+      });
+
+      ws.on("error", (err) => {
+        logger.error("websocket connection error", { account, error: err.message });
+      });
+
+      const streamEntry = { ws, subscriptions, initialized: false, userAgent: req.headers["user-agent"] || "" };
+
+      if (!activeStreams.has(account)) {
+        activeStreams.set(account, new Set());
+      }
+      activeStreams.get(account).add(streamEntry);
+
+      ws.on("close", () => {
+        const streams = activeStreams.get(account);
+        if (streams) {
+          streams.delete(streamEntry);
+          if (streams.size === 0) activeStreams.delete(account);
+        }
+        logger.stream("disconnected", { account });
+      });
+
+      if (stream) addSubscription(stream, { list: listId, tag });
+
+      logger.stream("connected", { account });
+      startPolling();
     });
-
-    if (stream) addSubscription(stream, { list: listId, tag });
-
-    logger.stream("connected", { account });
-    startPolling();
-  });
+  } catch (err) {
+    logger.error("ws upgrade: handleUpgrade failed", { account, error: err.message });
+    if (!socket.destroyed) {
+      socket.end("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n");
+    }
+  }
 });
 
 function markNotificationSent(accountOwnerId, notificationId, streamKey) {
