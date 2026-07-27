@@ -47,7 +47,6 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=tag
-            type=sha,prefix=,format=short
             type=raw,value=${{ steps.pkg.outputs.version }}
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' }}
 
