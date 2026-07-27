@@ -35,7 +35,10 @@ No test framework. Verify via:
 ## Architecture Notes
 
 - OAuth sessions and push subscriptions are persisted as JSON files in `DATA_DIR`
-- Token validation caches results in memory (`tokenCache` Map) with 5min TTL
+- Token validation caches results in memory (`tokenCache` Map) with 30s TTL
+- Token scopes are extracted from X-OAuth-Scopes response header
+- Streaming endpoints require `read` scope; push endpoints require `read` or `push` scope
+- Push subscriptions are scoped per access_token (multi-client support)
 - Dedup uses compound keys (`accountId:streamKey`) per stream type:
   - `\"user\"` for home timeline / user notification streams
   - `\"user:notification\"` for notification-only streams

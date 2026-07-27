@@ -3,14 +3,16 @@
  * Hollo Stream Proxy
  *
  * 機能:
- * 1. OAuth ログイン (authorization code を手動入力)
+ * 1. Holloへ OAuth ログイン
  * 2. WebSocket Streaming (/api/v1/streaming)
  * 3. WebPush Subscription API (/api/v1/push/subscription)
  *
  * 認証方式:
  * - ログイン: OAuth authorization code → token 交換
- * - WebSocket/Push: DBのoauth_tokensテーブルでトークン検証
- * - データ取得: Hollo API (/timelines/home, /notifications) をポーリング
+ * - WebSocket: ?access_token=, Authorization: Bearer, Sec-WebSocket-Protocol
+ * - Push: Authorization: Bearer
+ * - トークン検証: Hollo API (/api/v1/accounts/verify_credentials) で検証、結果を5分間キャッシュ
+ * - データ取得: Hollo API (/timelines/home, /notifications, etc.) をポーリング
  */
 
 import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
@@ -68,8 +70,8 @@ await mkdir(DATA_DIR, { recursive: true });
 // ── Push subscriptions (PVC JSON file) ───────────────────────────────────
 // ── Token cache (DBクエリ削減) ──────────────────────────────────────────
 const tokenCache = new Map(); // token → { accountOwnerId, scopes, valid, expiresAt }
-const TOKEN_CACHE_TTL_MS = 300_000; // 5 min
-const TOKEN_CACHE_NEG_TTL_MS = 60_000; // invalid token: 1 min
+const TOKEN_CACHE_TTL_MS = 30_000;
+const TOKEN_CACHE_NEG_TTL_MS = 30_000;
 
 // ── OAuth sessions (補助情報) ──────────────────────────────────────────
 async function loadOAuthSessions() {
@@ -180,9 +182,11 @@ async function verifyToken(token) {
       return null;
     }
     const account = await res.json();
+    const scopesStr = res.headers.get("X-OAuth-Scopes") || res.headers.get("x-oauth-scopes") || "";
+    const scopes = scopesStr.split(/\s+/).filter(Boolean);
     const info = {
       accountOwnerId: account.id,
-      scopes: [],
+      scopes,
       valid: true,
       expiresAt: Date.now() + TOKEN_CACHE_TTL_MS,
       account: {
@@ -215,12 +219,12 @@ async function exchangeCodeForToken(code) {
       redirect_uri: "urn:ietf:wg:oauth:2.0:oob",
     }),
   });
-  
+
   if (!res.ok) {
     const errorText = await res.text();
     throw new Error(`Token exchange failed: ${res.status} - ${errorText}`);
   }
-  
+
   return await res.json();
 }
 
@@ -243,11 +247,11 @@ async function saveSubsFile(data) {
 async function saveSubscription(accountId, sub, alertsData, accessToken) {
   const data = await loadSubsFile();
   if (!data.subscriptions[accountId]) data.subscriptions[accountId] = [];
-  
+
   const idx = data.subscriptions[accountId].findIndex(
     (s) => s.endpoint === sub.endpoint,
   );
-  
+
   const entry = {
     endpoint: sub.endpoint,
     keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth },
@@ -268,20 +272,21 @@ async function saveSubscription(accountId, sub, alertsData, accessToken) {
     },
     created_at: new Date().toISOString(),
   };
-  
+
   if (idx >= 0) {
     data.subscriptions[accountId][idx] = entry;
   } else {
     data.subscriptions[accountId].push(entry);
   }
-  
+
   await saveSubsFile(data);
 }
 
-async function loadSubscription(accountId) {
+async function loadSubscription(accountId, accessToken) {
   const data = await loadSubsFile();
   const subs = data.subscriptions[accountId];
-  return subs && subs.length > 0 ? subs[0] : null;
+  if (!subs || subs.length === 0) return null;
+  return subs.find(s => s.access_token === accessToken) || null;
 }
 
 async function loadSubscriptions(accountId) {
@@ -289,32 +294,37 @@ async function loadSubscriptions(accountId) {
   return data.subscriptions[accountId] || [];
 }
 
-async function deleteSubscription(accountId) {
-  const data = await loadSubsFile();
-  delete data.subscriptions[accountId];
-  await saveSubsFile(data);
-}
-
-async function updateAlerts(accountId, alertsData) {
+async function deleteSubscription(accountId, accessToken) {
   const data = await loadSubsFile();
   const subs = data.subscriptions[accountId];
   if (!subs) return;
-  for (const sub of subs) {
-    sub.alerts = {
-      mention: alertsData.mention !== false,
-      status: alertsData.status !== false,
-      reblog: alertsData.reblog !== false,
-      favourite: alertsData.favourite !== false,
-      follow: alertsData.follow !== false,
-      follow_request: alertsData.follow_request !== false,
-      poll: alertsData.poll !== false,
-      update: alertsData.update !== false,
-      admin_sign_up: alertsData.admin_sign_up !== false,
-      admin_report: alertsData.admin_report !== false,
-      severed_relationships: alertsData.severed_relationships !== false,
-      reaction: alertsData.reaction !== false,
-    };
+  data.subscriptions[accountId] = subs.filter(s => s.access_token !== accessToken);
+  if (data.subscriptions[accountId].length === 0) {
+    delete data.subscriptions[accountId];
   }
+  await saveSubsFile(data);
+}
+
+async function updateAlerts(accountId, alertsData, accessToken) {
+  const data = await loadSubsFile();
+  const subs = data.subscriptions[accountId];
+  if (!subs) return;
+  const sub = subs.find(s => s.access_token === accessToken);
+  if (!sub) return;
+  sub.alerts = {
+    mention: alertsData.mention !== false,
+    status: alertsData.status !== false,
+    reblog: alertsData.reblog !== false,
+    favourite: alertsData.favourite !== false,
+    follow: alertsData.follow !== false,
+    follow_request: alertsData.follow_request !== false,
+    poll: alertsData.poll !== false,
+    update: alertsData.update !== false,
+    admin_sign_up: alertsData.admin_sign_up !== false,
+    admin_report: alertsData.admin_report !== false,
+    severed_relationships: alertsData.severed_relationships !== false,
+    reaction: alertsData.reaction !== false,
+  };
   await saveSubsFile(data);
 }
 
@@ -466,24 +476,24 @@ async function fetchHashtagTimelineAPI(accessToken, tag, { local = false, sinceI
 async function fetchNotificationsAPI(accessToken, sinceId = null) {
   const params = new URLSearchParams({ limit: "30" });
   if (sinceId) params.set("since_id", sinceId);
-  
+
   const res = await fetch(
     `${HOLLO_URL}/api/v1/notifications?${params}`,
     { headers: { Authorization: `Bearer ${accessToken}` } },
   );
-  
+
   if (!res.ok) {
     logger.error("notifications API error", { status: res.status });
     return { notifications: [], latestId: null };
   }
-  
+
   const notifications = await res.json();
-  
+
   let latestId = null;
   if (notifications.length > 0) {
     latestId = notifications[0].id;
   }
-  
+
   return { notifications, latestId };
 }
 
@@ -525,7 +535,7 @@ function renderTokenPage(tokenData, account) {
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
   const path = url.pathname;
-  
+
   // CORS
   if (path.startsWith("/api/") || path.startsWith("/auth/")) {
     res.setHeader("Access-Control-Allow-Origin", "*");
@@ -551,10 +561,10 @@ const server = createServer(async (req, res) => {
   if (path === "/auth/login" && req.method === "POST") {
     let body = "";
     for await (const chunk of req) body += chunk;
-    
+
     const params = new URLSearchParams(body);
     const code = params.get("code");
-    
+
     if (!code) {
       const sessions = await listOAuthSessions();
       const html = renderLoginPage(sessions, null, "Authorization codeが必要です");
@@ -562,11 +572,11 @@ const server = createServer(async (req, res) => {
       res.end(html);
       return;
     }
-    
+
     try {
       // Exchange code for token
       const tokenData = await exchangeCodeForToken(code);
-      
+
       // Validate token via DB to get account_id
       const tokenInfo = await verifyToken(tokenData.access_token);
       if (!tokenInfo?.accountOwnerId) {
@@ -583,9 +593,9 @@ const server = createServer(async (req, res) => {
         account_avatar: account.avatar,
         scopes: tokenData.scope?.split(" ") || [],
       });
-      
+
       logger.auth("login success", { account: account.acct });
-      
+
       const html = renderTokenPage(tokenData, account);
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
       res.end(html);
@@ -629,24 +639,30 @@ const server = createServer(async (req, res) => {
     const bearerToken = authHeader.startsWith("Bearer ")
       ? authHeader.slice(7)
       : url.searchParams.get("access_token");
-    
+
     if (!bearerToken) {
       res.writeHead(401, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Unauthorized" }));
       return;
     }
-    
+
     const tokenInfo = await verifyToken(bearerToken);
     if (!tokenInfo?.accountOwnerId) {
       res.writeHead(401, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Unauthorized" }));
       return;
     }
-    
+
+    if (!tokenInfo.scopes.includes("push") && !tokenInfo.scopes.includes("read")) {
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Forbidden: missing push or read scope" }));
+      return;
+    }
+
     const id = tokenInfo.accountOwnerId;
 
     if (req.method === "GET") {
-      const sub = await loadSubscription(id);
+      const sub = await loadSubscription(id, bearerToken);
       if (!sub) {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({}));
@@ -691,14 +707,15 @@ const server = createServer(async (req, res) => {
       try { parsed = JSON.parse(body); } catch {
         res.writeHead(400); res.end(JSON.stringify({ error: "Invalid JSON" })); return;
       }
-      if (parsed.data?.alerts) await updateAlerts(id, parsed.data.alerts);
+      if (parsed.data?.alerts) await updateAlerts(id, parsed.data.alerts, bearerToken);
       res.writeHead(200); res.end(JSON.stringify({}));
       return;
     }
 
     if (req.method === "DELETE") {
-      await deleteSubscription(id);
-      pushAccounts.delete(id);
+      await deleteSubscription(id, bearerToken);
+      const remaining = await loadSubscriptions(id);
+      if (remaining.length === 0) pushAccounts.delete(id);
       logger.push("subscription deleted", { account: id });
       res.writeHead(200); res.end(JSON.stringify({}));
       return;
@@ -760,6 +777,12 @@ const server = createServer(async (req, res) => {
     if (!tokenInfo?.accountOwnerId) {
       res.writeHead(401, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Unauthorized" }));
+      return;
+    }
+
+    if (!tokenInfo.scopes.includes("read")) {
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Forbidden: missing read scope" }));
       return;
     }
 
@@ -915,6 +938,11 @@ server.on("upgrade", async (req, socket, head) => {
 
   if (!tokenInfo?.accountOwnerId) {
     socket.end("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+    return;
+  }
+
+  if (!tokenInfo.scopes.includes("read")) {
+    socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
     return;
   }
 
@@ -1082,11 +1110,11 @@ let pollTimer = null;
 
 function startPolling() {
   if (pollTimer) return;
-  
+
   const poll = async () => {
     const accountIds = new Set([...activeStreams.keys(), ...pushAccounts]);
     if (accountIds.size === 0) { pollTimer = null; return; }
-    
+
     for (const accountOwnerId of accountIds) {
       const streams = activeStreams.get(accountOwnerId);
       const hasUserStream = streams && [...streams].some(
@@ -1102,7 +1130,7 @@ function startPolling() {
         : [];
       const listIds = [...new Set(listSubs.map((s) => s.listId))];
       const listStreamEntries = streams
-      
+
       // Get access token from OAuth sessions (補助情報)
       const sessions = await listOAuthSessions();
       const session = sessions[accountOwnerId];
@@ -1110,18 +1138,18 @@ function startPolling() {
         logger.error("no access token for account", { account: accountOwnerId });
         continue;
       }
-      
+
       const accessToken = session.access_token;
-      
+
       // Notifications
       if (hasUserStream || pushAccounts.has(accountOwnerId)) {
         try {
           const sinceId = tlMaxIds.get(`notif_${accountOwnerId}`) || null;
           const { notifications, latestId } = await fetchNotificationsAPI(accessToken, sinceId);
-          
+
           if (notifications.length > 0) {
             if (latestId) tlMaxIds.set(`notif_${accountOwnerId}`, latestId);
-            
+
             // 初回接続時は既存通知を送信せず、チェックポイントのみ設定
             if (!sinceId) {
               logger.stream("notification checkpoint set", {
@@ -1134,7 +1162,7 @@ function startPolling() {
               const subs = pushAccounts.has(accountOwnerId)
                 ? await loadSubscriptions(accountOwnerId)
                 : [];
-              
+
               for (const n of notifications) {
                 const sanitized = sanitizeNotification(n);
 
@@ -1156,14 +1184,14 @@ function startPolling() {
                   if (s.sse) { s.send(eventJson); wsSent++; }
                   else { try { s.ws.send(eventJson); wsSent++; } catch (_) {} }
                 }
-                
+
                 if (subs.length > 0) {
-                  const payload = buildPushPayload(sanitized, accessToken);
                   let sentForNotification = 0;
                   for (let i = subs.length - 1; i >= 0; i--) {
                     const sub = subs[i];
                     if (!shouldSendPush(sub.alerts, sanitized)) continue;
-                    
+
+                    const payload = buildPushPayload(sanitized, sub.access_token);
                     const result = await sendPushNotification(sub, payload);
                     if (result.removed) {
                       await removePushSubscription(sub.endpoint);
@@ -1178,7 +1206,7 @@ function startPolling() {
                   }
                 }
               }
-              
+
               if (wsSent > 0 || wsSkipped > 0) {
                 logger.stream("notification", {
                   account: accountOwnerId, sent: wsSent, skipped: wsSkipped,
@@ -1199,7 +1227,7 @@ function startPolling() {
           });
         }
       }
-      
+
       // Timeline
       if (hasTimelineStream) {
         try {
@@ -1442,14 +1470,14 @@ function startPolling() {
         }
       }
     }
-    
+
     if (activeStreams.size === 0 && pushAccounts.size === 0) {
       pollTimer = null;
       return;
     }
     pollTimer = setTimeout(poll, POLL_INTERVAL_MS);
   };
-  
+
   pollTimer = setTimeout(poll, POLL_INTERVAL_MS);
 }
 
