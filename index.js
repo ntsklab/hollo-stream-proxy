@@ -419,7 +419,7 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    if (!tokenInfo.scopes.includes("push") && !tokenInfo.scopes.includes("read")) {
+    if (tokenInfo.scopes.length > 0 && !tokenInfo.scopes.includes("push") && !tokenInfo.scopes.includes("read")) {
       res.writeHead(403, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Forbidden: missing push or read scope" }));
       return;
@@ -546,7 +546,7 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    if (!tokenInfo.scopes.includes("read")) {
+    if (tokenInfo.scopes.length > 0 && !tokenInfo.scopes.includes("read")) {
       res.writeHead(403, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Forbidden: missing read scope" }));
       return;
@@ -707,7 +707,7 @@ server.on("upgrade", async (req, socket, head) => {
     return;
   }
 
-  if (!tokenInfo.scopes.includes("read")) {
+  if (tokenInfo.scopes.length > 0 && !tokenInfo.scopes.includes("read")) {
     socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
     return;
   }
