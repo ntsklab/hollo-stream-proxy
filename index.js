@@ -3,16 +3,14 @@
  * Hollo Stream Proxy
  *
  * 機能:
- * 1. Holloへ OAuth ログイン
- * 2. WebSocket Streaming (/api/v1/streaming)
- * 3. WebPush Subscription API (/api/v1/push/subscription)
+ * 1. WebSocket Streaming (/api/v1/streaming)
+ * 2. WebPush Subscription API (/api/v1/push/subscription)
  *
  * 認証方式:
- * - ログイン: OAuth authorization code → token 交換
  * - WebSocket: ?access_token=, Authorization: Bearer, Sec-WebSocket-Protocol
  * - Push: Authorization: Bearer
- * - トークン検証: Hollo API (/api/v1/accounts/verify_credentials) で検証、結果を5分間キャッシュ
- * - データ取得: Hollo API (/timelines/home, /notifications, etc.) をポーリング
+ * - トークン検証: Hollo API (/api/v1/accounts/verify_credentials) で検証、結果を30秒間キャッシュ
+ * - データ取得: 各クライアントのトークンで Hollo API をポーリング
  */
 
 import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
@@ -31,8 +29,6 @@ if (!HOLLO_URL) {
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL || "5000", 10);
 const DATA_DIR = process.env.DATA_DIR || "/data";
 const SUBS_FILE = `${DATA_DIR}/push_subscriptions.json`;
-const OAUTH_SESSIONS_FILE = `${DATA_DIR}/oauth_sessions.json`;
-const CLIENT_CREDENTIALS_FILE = `${DATA_DIR}/client_credentials.json`;
 
 const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || "";
 const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || "";
@@ -72,92 +68,6 @@ await mkdir(DATA_DIR, { recursive: true });
 const tokenCache = new Map(); // token → { accountOwnerId, scopes, valid, expiresAt }
 const TOKEN_CACHE_TTL_MS = 30_000;
 const TOKEN_CACHE_NEG_TTL_MS = 30_000;
-
-// ── OAuth sessions (補助情報) ──────────────────────────────────────────
-async function loadOAuthSessions() {
-  try {
-    return JSON.parse(await readFile(OAUTH_SESSIONS_FILE, "utf8"));
-  } catch {
-    return { sessions: {} };
-  }
-}
-
-async function saveOAuthSessions(data) {
-  const tmp = `${OAUTH_SESSIONS_FILE}.tmp`;
-  await writeFile(tmp, JSON.stringify(data, null, 2));
-  await rename(tmp, OAUTH_SESSIONS_FILE);
-}
-
-async function addOAuthSession(tokenData) {
-  const data = await loadOAuthSessions();
-  data.sessions[tokenData.account_id] = {
-    ...tokenData,
-    created_at: new Date().toISOString(),
-  };
-  await saveOAuthSessions(data);
-  logger.auth("session saved", { account: tokenData.account_handle });
-}
-
-async function listOAuthSessions() {
-  const data = await loadOAuthSessions();
-  return data.sessions;
-}
-
-async function removeOAuthSession(accountId) {
-  const data = await loadOAuthSessions();
-  delete data.sessions[accountId];
-  await saveOAuthSessions(data);
-  logger.auth("session removed", { account: accountId });
-}
-
-// ── Client credentials (OAuth app registration) ─────────────────────────
-let clientCredentials = null;
-
-async function loadClientCredentials() {
-  try {
-    return JSON.parse(await readFile(CLIENT_CREDENTIALS_FILE, "utf8"));
-  } catch {
-    return null;
-  }
-}
-
-async function saveClientCredentials(data) {
-  await writeFile(CLIENT_CREDENTIALS_FILE, JSON.stringify(data, null, 2));
-}
-
-async function registerApp() {
-  const existing = await loadClientCredentials();
-  if (existing?.client_id && existing?.client_secret) {
-    clientCredentials = existing;
-    logger.info("using existing client credentials", { client_id: existing.client_id });
-    return;
-  }
-
-  logger.info("registering OAuth app with Hollo...");
-  const res = await fetch(`${HOLLO_URL}/api/v1/apps`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      client_name: "Hollo Stream Proxy",
-      redirect_uris: "urn:ietf:wg:oauth:2.0:oob",
-      scopes: "read",
-      website: HOLLO_URL,
-    }),
-  });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`App registration failed: ${res.status} - ${text}`);
-  }
-
-  const data = await res.json();
-  clientCredentials = {
-    client_id: data.client_id,
-    client_secret: data.client_secret,
-  };
-  await saveClientCredentials(clientCredentials);
-  logger.info("app registered", { client_id: clientCredentials.client_id });
-}
 
 // ── Token validation via Hollo API ──────────────────────────────────────
 async function verifyToken(token) {
@@ -202,30 +112,6 @@ async function verifyToken(token) {
     logger.error("token verification failed", { error: err.message });
     return null;
   }
-}
-
-// ── Exchange authorization code for token ────────────────────────────────
-async function exchangeCodeForToken(code) {
-  // OAuth authorization code → token 交換
-  const res = await fetch(`${HOLLO_URL}/oauth/token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      grant_type: "authorization_code",
-      code: code,
-      client_id: clientCredentials.client_id,
-      client_secret: clientCredentials.client_secret,
-      scope: "read",
-      redirect_uri: "urn:ietf:wg:oauth:2.0:oob",
-    }),
-  });
-
-  if (!res.ok) {
-    const errorText = await res.text();
-    throw new Error(`Token exchange failed: ${res.status} - ${errorText}`);
-  }
-
-  return await res.json();
 }
 
 // ── Push subscriptions ──────────────────────────────────────────────────
@@ -497,40 +383,6 @@ async function fetchNotificationsAPI(accessToken, sinceId = null) {
   return { notifications, latestId };
 }
 
-// ── HTML Pages ────────────────────────────────────────────────────────────
-
-let loginTemplate = "";
-let tokenTemplate = "";
-
-async function loadTemplates() {
-  const dir = new URL(".", import.meta.url).pathname;
-  loginTemplate = await readFile(`${dir}pages/login.html`, "utf-8");
-  tokenTemplate = await readFile(`${dir}pages/token.html`, "utf-8");
-}
-
-function renderLoginPage(sessions, message = null, error = null) {
-  const rows = Object.entries(sessions)
-    .map(([id, s]) => `<tr><td>${s.account_handle}</td><td>${s.account_display_name || "-"}</td><td>${new Date(s.created_at).toISOString().slice(0, 10)}</td><td><button onclick="if(confirm('Delete?')){fetch('/api/v1/sessions/${id}',{method:'DELETE'}).then(()=>location.reload())}">Delete</button></td></tr>`)
-    .join("");
-  const list = rows
-    ? `<table><tr><th>Handle</th><th>Name</th><th>Date</th><th></th></tr>${rows}</table>`
-    : "<p>No sessions</p>";
-  const authUrl = `${HOLLO_URL}/oauth/authorize?response_type=code&client_id=${clientCredentials.client_id}&redirect_uri=urn:ietf:wg:oauth:2.0:oob&scope=read`;
-  return loginTemplate
-    .replace("{{MESSAGE}}", message ? `<div class="msg msg-ok">${message}</div>` : "")
-    .replace("{{ERROR}}", error ? `<div class="msg msg-err">${error}</div>` : "")
-    .replace("{{AUTH_URL}}", authUrl)
-    .replace("{{SESSION_LIST}}", list)
-    .replace("{{PORT}}", String(PORT));
-}
-
-function renderTokenPage(tokenData, account) {
-  return tokenTemplate
-    .replace("{{DISPLAY_NAME}}", account.display_name || account.acct)
-    .replace("{{ACCT}}", account.acct)
-    .replace("{{ACCESS_TOKEN}}", tokenData.access_token);
-}
-
 // ── Server ────────────────────────────────────────────────────────────────
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
@@ -546,91 +398,6 @@ const server = createServer(async (req, res) => {
       res.end();
       return;
     }
-  }
-
-  // ── Login page ────────────────────────────────────────────────────────
-  if (path === "/" && req.method === "GET") {
-    const sessions = await listOAuthSessions();
-    const html = renderLoginPage(sessions);
-    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-    res.end(html);
-    return;
-  }
-
-  // ── OAuth: Login with code ────────────────────────────────────────────
-  if (path === "/auth/login" && req.method === "POST") {
-    let body = "";
-    for await (const chunk of req) body += chunk;
-
-    const params = new URLSearchParams(body);
-    const code = params.get("code");
-
-    if (!code) {
-      const sessions = await listOAuthSessions();
-      const html = renderLoginPage(sessions, null, "Authorization codeが必要です");
-      res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
-      res.end(html);
-      return;
-    }
-
-    try {
-      // Exchange code for token
-      const tokenData = await exchangeCodeForToken(code);
-
-      // Validate token via DB to get account_id
-      const tokenInfo = await verifyToken(tokenData.access_token);
-      if (!tokenInfo?.accountOwnerId) {
-        throw new Error("Token validation failed");
-      }
-      const account = tokenInfo.account;
-
-      // Save session
-      await addOAuthSession({
-        access_token: tokenData.access_token,
-        account_id: account.id,
-        account_handle: account.acct,
-        account_display_name: account.display_name,
-        account_avatar: account.avatar,
-        scopes: tokenData.scope?.split(" ") || [],
-      });
-
-      logger.auth("login success", { account: account.acct });
-
-      const html = renderTokenPage(tokenData, account);
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-      res.end(html);
-    } catch (err) {
-      logger.error("login failed", { error: err.message });
-      const sessions = await listOAuthSessions();
-      const html = renderLoginPage(sessions, null, `ログイン失敗: ${err.message}`);
-      res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
-      res.end(html);
-    }
-    return;
-  }
-
-  // ── Remove session ────────────────────────────────────────────────────
-  if (path.match(/^\/api\/v1\/sessions\/(.+)$/) && req.method === "DELETE") {
-    const accountId = path.match(/^\/api\/v1\/sessions\/(.+)$/)[1];
-    await removeOAuthSession(accountId);
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ success: true }));
-    return;
-  }
-
-  // ── List sessions (API) ──────────────────────────────────────────────
-  if (path === "/api/v1/sessions" && req.method === "GET") {
-    const sessions = await listOAuthSessions();
-    const list = Object.entries(sessions).map(([id, s]) => ({
-      account_id: id,
-      account_handle: s.account_handle,
-      account_display_name: s.account_display_name,
-      account_avatar: s.account_avatar,
-      created_at: s.created_at,
-    }));
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(list));
-    return;
   }
 
   // ── Push subscription API ────────────────────────────────────────────
@@ -822,7 +589,7 @@ const server = createServer(async (req, res) => {
     const subscriptions = new Map();
     subscriptions.set(key, { stream, listId: subListId, tag: subTag });
 
-    const sseEntry = { ws: null, subscriptions, initialized: false, userAgent: req.headers["user-agent"] || "", sse: true };
+    const sseEntry = { ws: null, subscriptions, initialized: false, userAgent: req.headers["user-agent"] || "", sse: true, token };
 
     sseEntry.send = (eventJson) => {
       try {
@@ -992,7 +759,7 @@ server.on("upgrade", async (req, socket, head) => {
         logger.error("websocket connection error", { account, error: err.message });
       });
 
-      const streamEntry = { ws, subscriptions, initialized: false, userAgent: req.headers["user-agent"] || "" };
+      const streamEntry = { ws, subscriptions, initialized: false, userAgent: req.headers["user-agent"] || "", token };
 
       if (!activeStreams.has(account)) {
         activeStreams.set(account, new Set());
@@ -1112,45 +879,45 @@ function startPolling() {
   if (pollTimer) return;
 
   const poll = async () => {
-    const accountIds = new Set([...activeStreams.keys(), ...pushAccounts]);
-    if (accountIds.size === 0) { pollTimer = null; return; }
-
-    for (const accountOwnerId of accountIds) {
-      const streams = activeStreams.get(accountOwnerId);
-      const hasUserStream = streams && [...streams].some(
-        (s) => s.subscriptions.has("user") || s.subscriptions.has("user:notification"),
-      );
-      const hasTimelineStream = streams && [...streams].some(
-        (s) => s.subscriptions.has("user"),
-      );
-      const listSubs = streams
-        ? [...streams].flatMap((s) =>
-            [...s.subscriptions.values()].filter((sub) => sub.stream === "list" && sub.listId)
-          )
-        : [];
-      const listIds = [...new Set(listSubs.map((s) => s.listId))];
-      const listStreamEntries = streams
-
-      // Get access token from OAuth sessions (補助情報)
-      const sessions = await listOAuthSessions();
-      const session = sessions[accountOwnerId];
-      if (!session?.access_token) {
-        logger.error("no access token for account", { account: accountOwnerId });
-        continue;
+    // Collect all active stream entries
+    const allStreamEntries = [];
+    for (const streams of activeStreams.values()) {
+      for (const s of streams) {
+        allStreamEntries.push(s);
       }
+    }
 
-      const accessToken = session.access_token;
+    // If no active streams and no push accounts, stop polling
+    if (allStreamEntries.length === 0 && pushAccounts.size === 0) {
+      pollTimer = null;
+      return;
+    }
+
+    // Poll for each stream entry independently
+    for (const streamEntry of allStreamEntries) {
+      const accessToken = streamEntry.token;
+      if (!accessToken) continue;
+
+      const subscriptions = streamEntry.subscriptions;
+      const hasUserStream = subscriptions.has("user") || subscriptions.has("user:notification");
+      const hasTimelineStream = subscriptions.has("user");
+      const listSubs = [...subscriptions.values()].filter((sub) => sub.stream === "list" && sub.listId);
+      const listIds = [...new Set(listSubs.map((s) => s.listId))];
+
+      // Get account ID from token
+      const tokenInfo = await verifyToken(accessToken);
+      if (!tokenInfo?.accountOwnerId) continue;
+      const accountOwnerId = tokenInfo.accountOwnerId;
 
       // Notifications
-      if (hasUserStream || pushAccounts.has(accountOwnerId)) {
+      if (hasUserStream) {
         try {
-          const sinceId = tlMaxIds.get(`notif_${accountOwnerId}`) || null;
+          const sinceId = tlMaxIds.get(`notif_${accountOwnerId}_${accessToken}`) || null;
           const { notifications, latestId } = await fetchNotificationsAPI(accessToken, sinceId);
 
           if (notifications.length > 0) {
-            if (latestId) tlMaxIds.set(`notif_${accountOwnerId}`, latestId);
+            if (latestId) tlMaxIds.set(`notif_${accountOwnerId}_${accessToken}`, latestId);
 
-            // 初回接続時は既存通知を送信せず、チェックポイントのみ設定
             if (!sinceId) {
               logger.stream("notification checkpoint set", {
                 account: accountOwnerId, latestId, count: notifications.length,
@@ -1158,64 +925,29 @@ function startPolling() {
             } else {
               let wsSent = 0;
               let wsSkipped = 0;
-              let pushSent = 0;
-              const subs = pushAccounts.has(accountOwnerId)
-                ? await loadSubscriptions(accountOwnerId)
-                : [];
 
               for (const n of notifications) {
                 const sanitized = sanitizeNotification(n);
+                if (!subscriptions.has("user") && !subscriptions.has("user:notification")) continue;
 
-                for (const s of streams || []) {
-                  if (!s.sse && s.ws?.readyState !== 1) continue;
-                  if (!s.subscriptions.has("user") && !s.subscriptions.has("user:notification")) continue;
-
-                  const notifStream = s.subscriptions.has("user:notification") ? "user:notification" : "user";
-                  if (markNotificationSent(accountOwnerId, String(n.id), notifStream)) {
-                    wsSkipped++;
-                    continue;
-                  }
-
-                  const eventJson = JSON.stringify({
-                    stream: [notifStream],
-                    event: "notification",
-                    payload: JSON.stringify(sanitized),
-                  });
-                  if (s.sse) { s.send(eventJson); wsSent++; }
-                  else { try { s.ws.send(eventJson); wsSent++; } catch (_) {} }
+                const notifStream = subscriptions.has("user:notification") ? "user:notification" : "user";
+                if (markNotificationSent(`${accountOwnerId}_${accessToken}`, String(n.id), notifStream)) {
+                  wsSkipped++;
+                  continue;
                 }
 
-                if (subs.length > 0) {
-                  let sentForNotification = 0;
-                  for (let i = subs.length - 1; i >= 0; i--) {
-                    const sub = subs[i];
-                    if (!shouldSendPush(sub.alerts, sanitized)) continue;
-
-                    const payload = buildPushPayload(sanitized, sub.access_token);
-                    const result = await sendPushNotification(sub, payload);
-                    if (result.removed) {
-                      await removePushSubscription(sub.endpoint);
-                      subs.splice(i, 1);
-                    } else if (result.ok) {
-                      sentForNotification++;
-                    }
-                  }
-                  pushSent += sentForNotification;
-                  if (subs.length === 0) {
-                    pushAccounts.delete(accountOwnerId);
-                  }
-                }
+                const eventJson = JSON.stringify({
+                  stream: [notifStream],
+                  event: "notification",
+                  payload: JSON.stringify(sanitized),
+                });
+                if (streamEntry.sse) { streamEntry.send(eventJson); wsSent++; }
+                else if (streamEntry.ws?.readyState === 1) { try { streamEntry.ws.send(eventJson); wsSent++; } catch (_) {} }
               }
 
               if (wsSent > 0 || wsSkipped > 0) {
                 logger.stream("notification", {
                   account: accountOwnerId, sent: wsSent, skipped: wsSkipped,
-                  fetched: notifications.length,
-                });
-              }
-              if (pushSent > 0) {
-                logger.push("notification", {
-                  account: accountOwnerId, sent: pushSent,
                   fetched: notifications.length,
                 });
               }
@@ -1231,13 +963,12 @@ function startPolling() {
       // Timeline
       if (hasTimelineStream) {
         try {
-          const sinceId = tlMaxIds.get(accountOwnerId) || null;
+          const sinceId = tlMaxIds.get(`${accountOwnerId}_${accessToken}`) || null;
           const { statuses, latestId } = await fetchHomeTimelineAPI(accessToken, sinceId);
 
           if (statuses.length > 0) {
-            if (latestId) tlMaxIds.set(accountOwnerId, latestId);
+            if (latestId) tlMaxIds.set(`${accountOwnerId}_${accessToken}`, latestId);
 
-            // 初回接続時は既存投稿を送信せず、チェックポイントのみ設定
             if (!sinceId) {
               logger.stream("timeline checkpoint set", {
                 account: accountOwnerId, latestId, count: statuses.length,
@@ -1247,21 +978,19 @@ function startPolling() {
               let skipped = 0;
 
               for (const status of statuses.reverse()) {
-                if (markTlPostSent(accountOwnerId, String(status.id), "user")) {
+                if (markTlPostSent(`${accountOwnerId}_${accessToken}`, String(status.id), "user")) {
                   skipped++;
                   continue;
                 }
 
-                for (const s of streams) {
-                  if (s.subscriptions.has("user") && (s.sse || s.ws?.readyState === 1)) {
-                    const eventJson = JSON.stringify({
-                      stream: ["user"],
-                      event: "update",
-                      payload: JSON.stringify(sanitizeStatus(status)),
-                    });
-                    if (s.sse) { s.send(eventJson); sent++; }
-                    else { try { s.ws.send(eventJson); sent++; } catch (_) {} }
-                  }
+                if (subscriptions.has("user")) {
+                  const eventJson = JSON.stringify({
+                    stream: ["user"],
+                    event: "update",
+                    payload: JSON.stringify(sanitizeStatus(status)),
+                  });
+                  if (streamEntry.sse) { streamEntry.send(eventJson); sent++; }
+                  else if (streamEntry.ws?.readyState === 1) { try { streamEntry.ws.send(eventJson); sent++; } catch (_) {} }
                 }
               }
 
@@ -1282,11 +1011,11 @@ function startPolling() {
       // List Timelines
       for (const lid of listIds) {
         try {
-          const sinceId = tlMaxIds.get(`list:${lid}`) || null;
+          const sinceId = tlMaxIds.get(`list:${lid}_${accessToken}`) || null;
           const { statuses, latestId } = await fetchListTimelineAPI(accessToken, lid, sinceId);
 
           if (statuses.length > 0) {
-            if (latestId) tlMaxIds.set(`list:${lid}`, latestId);
+            if (latestId) tlMaxIds.set(`list:${lid}_${accessToken}`, latestId);
 
             if (!sinceId) {
               logger.stream("list timeline checkpoint set", {
@@ -1297,22 +1026,20 @@ function startPolling() {
               let skipped = 0;
 
               for (const status of statuses.reverse()) {
-                if (markTlPostSent(accountOwnerId, String(status.id), `list:${lid}`)) {
+                if (markTlPostSent(`${accountOwnerId}_${accessToken}`, String(status.id), `list:${lid}`)) {
                   skipped++;
                   continue;
                 }
 
-                for (const s of streams) {
-                  const sub = s.subscriptions.get(`list:${lid}`);
-                  if (sub && (s.sse || s.ws?.readyState === 1)) {
-                    const eventJson = JSON.stringify({
-                      stream: ["list", lid],
-                      event: "update",
-                      payload: JSON.stringify(sanitizeStatus(status)),
-                    });
-                    if (s.sse) { s.send(eventJson); sent++; }
-                    else { try { s.ws.send(eventJson); sent++; } catch (_) {} }
-                  }
+                const sub = subscriptions.get(`list:${lid}`);
+                if (sub) {
+                  const eventJson = JSON.stringify({
+                    stream: ["list", lid],
+                    event: "update",
+                    payload: JSON.stringify(sanitizeStatus(status)),
+                  });
+                  if (streamEntry.sse) { streamEntry.send(eventJson); sent++; }
+                  else if (streamEntry.ws?.readyState === 1) { try { streamEntry.ws.send(eventJson); sent++; } catch (_) {} }
                 }
               }
 
@@ -1331,27 +1058,19 @@ function startPolling() {
       }
 
       // Public timelines
-      const publicStreams = streams
-        ? [...streams].filter((s) =>
-            s.subscriptions.has("public") ||
-            s.subscriptions.has("public:local") ||
-            s.subscriptions.has("public:remote"))
-        : [];
       const publicVariants = new Map();
-      for (const s of publicStreams) {
-        ["public", "public:local", "public:remote"].forEach((st) => {
-          if (s.subscriptions.has(st)) {
-            publicVariants.set(st, { local: st === "public:local", remote: st === "public:remote" });
-          }
-        });
-      }
+      ["public", "public:local", "public:remote"].forEach((st) => {
+        if (subscriptions.has(st)) {
+          publicVariants.set(st, { local: st === "public:local", remote: st === "public:remote" });
+        }
+      });
       for (const [streamKey, { local, remote }] of publicVariants) {
         try {
-          const sinceId = tlMaxIds.get(`${accountOwnerId}:${streamKey}`) || null;
+          const sinceId = tlMaxIds.get(`${accountOwnerId}:${streamKey}_${accessToken}`) || null;
           const { statuses, latestId } = await fetchPublicTimelineAPI(accessToken, { local, remote, sinceId });
 
           if (statuses.length > 0) {
-            if (latestId) tlMaxIds.set(`${accountOwnerId}:${streamKey}`, latestId);
+            if (latestId) tlMaxIds.set(`${accountOwnerId}:${streamKey}_${accessToken}`, latestId);
 
             if (!sinceId) {
               logger.stream("public timeline checkpoint set", {
@@ -1362,24 +1081,19 @@ function startPolling() {
               let skipped = 0;
 
               for (const status of statuses.reverse()) {
-                if (markTlPostSent(accountOwnerId, String(status.id), streamKey)) {
+                if (markTlPostSent(`${accountOwnerId}_${accessToken}`, String(status.id), streamKey)) {
                   skipped++;
                   continue;
                 }
 
-                const applicableStreams = streams
-                  ? [...streams].filter((s) => s.subscriptions.has(streamKey))
-                  : [];
-                for (const s of applicableStreams) {
-                  if (s.sse || s.ws?.readyState === 1) {
-                    const eventJson = JSON.stringify({
-                      stream: [streamKey],
-                      event: "update",
-                      payload: JSON.stringify(sanitizeStatus(status)),
-                    });
-                    if (s.sse) { s.send(eventJson); sent++; }
-                    else { try { s.ws.send(eventJson); sent++; } catch (_) {} }
-                  }
+                if (subscriptions.has(streamKey)) {
+                  const eventJson = JSON.stringify({
+                    stream: [streamKey],
+                    event: "update",
+                    payload: JSON.stringify(sanitizeStatus(status)),
+                  });
+                  if (streamEntry.sse) { streamEntry.send(eventJson); sent++; }
+                  else if (streamEntry.ws?.readyState === 1) { try { streamEntry.ws.send(eventJson); sent++; } catch (_) {} }
                 }
               }
 
@@ -1398,29 +1112,22 @@ function startPolling() {
       }
 
       // Hashtag timelines
-      const hashtagStreams = streams
-        ? [...streams].filter((s) =>
-            [...s.subscriptions.values()].some((sub) =>
-              (sub.stream === "hashtag" || sub.stream === "hashtag:local") && sub.tag))
-        : [];
       const hashtagGroups = new Map();
-      for (const s of hashtagStreams) {
-        for (const sub of s.subscriptions.values()) {
-          if ((sub.stream === "hashtag" || sub.stream === "hashtag:local") && sub.tag) {
-            const key = `${sub.stream}:${sub.tag}`;
-            if (!hashtagGroups.has(key)) {
-              hashtagGroups.set(key, { stream: sub.stream, tag: sub.tag, local: sub.stream === "hashtag:local" });
-            }
+      for (const sub of subscriptions.values()) {
+        if ((sub.stream === "hashtag" || sub.stream === "hashtag:local") && sub.tag) {
+          const key = `${sub.stream}:${sub.tag}`;
+          if (!hashtagGroups.has(key)) {
+            hashtagGroups.set(key, { stream: sub.stream, tag: sub.tag, local: sub.stream === "hashtag:local" });
           }
         }
       }
       for (const [key, { stream: streamKey, tag: htTag, local }] of hashtagGroups) {
         try {
-          const sinceId = tlMaxIds.get(`${accountOwnerId}:hashtag:${htTag}${local ? ":local" : ""}`) || null;
+          const sinceId = tlMaxIds.get(`${accountOwnerId}:hashtag:${htTag}${local ? ":local" : ""}_${accessToken}`) || null;
           const { statuses, latestId } = await fetchHashtagTimelineAPI(accessToken, htTag, { local, sinceId });
 
           if (statuses.length > 0) {
-            const dedupKey = `${accountOwnerId}:hashtag:${htTag}${local ? ":local" : ""}`;
+            const dedupKey = `${accountOwnerId}:hashtag:${htTag}${local ? ":local" : ""}_${accessToken}`;
             if (latestId) tlMaxIds.set(dedupKey, latestId);
 
             if (!sinceId) {
@@ -1432,27 +1139,20 @@ function startPolling() {
               let skipped = 0;
 
               for (const status of statuses.reverse()) {
-                if (markTlPostSent(accountOwnerId, String(status.id), dedupKey)) {
+                if (markTlPostSent(`${accountOwnerId}_${accessToken}`, String(status.id), dedupKey)) {
                   skipped++;
                   continue;
                 }
 
-                const applicableStreams = streams
-                  ? [...streams].filter((s) => {
-                      const sub = s.subscriptions.get(`${streamKey}:${htTag}`);
-                      return sub && sub.tag === htTag;
-                    })
-                  : [];
-                for (const s of applicableStreams) {
-                  if (s.sse || s.ws?.readyState === 1) {
-                    const eventJson = JSON.stringify({
-                      stream: [streamKey, htTag],
-                      event: "update",
-                      payload: JSON.stringify(sanitizeStatus(status)),
-                    });
-                    if (s.sse) { s.send(eventJson); sent++; }
-                    else { try { s.ws.send(eventJson); sent++; } catch (_) {} }
-                  }
+                const sub = subscriptions.get(`${streamKey}:${htTag}`);
+                if (sub && sub.tag === htTag) {
+                  const eventJson = JSON.stringify({
+                    stream: [streamKey, htTag],
+                    event: "update",
+                    payload: JSON.stringify(sanitizeStatus(status)),
+                  });
+                  if (streamEntry.sse) { streamEntry.send(eventJson); sent++; }
+                  else if (streamEntry.ws?.readyState === 1) { try { streamEntry.ws.send(eventJson); sent++; } catch (_) {} }
                 }
               }
 
@@ -1471,11 +1171,74 @@ function startPolling() {
       }
     }
 
-    if (activeStreams.size === 0 && pushAccounts.size === 0) {
-      pollTimer = null;
-      return;
+    // Poll for push subscriptions
+    for (const accountOwnerId of pushAccounts) {
+      try {
+        const subs = await loadSubscriptions(accountOwnerId);
+        if (subs.length === 0) {
+          pushAccounts.delete(accountOwnerId);
+          continue;
+        }
+
+        // Use the first subscription's token for polling
+        const accessToken = subs[0].access_token;
+        if (!accessToken) continue;
+
+        const sinceId = tlMaxIds.get(`notif_${accountOwnerId}_push`) || null;
+        const { notifications, latestId } = await fetchNotificationsAPI(accessToken, sinceId);
+
+        if (notifications.length > 0) {
+          if (latestId) tlMaxIds.set(`notif_${accountOwnerId}_push`, latestId);
+
+          if (!sinceId) {
+            logger.stream("notification checkpoint set", {
+              account: accountOwnerId, latestId, count: notifications.length,
+            });
+          } else {
+            let pushSent = 0;
+
+            for (const n of notifications) {
+              const sanitized = sanitizeNotification(n);
+
+              for (let i = subs.length - 1; i >= 0; i--) {
+                const sub = subs[i];
+                if (!shouldSendPush(sub.alerts, sanitized)) continue;
+
+                const payload = buildPushPayload(sanitized, sub.access_token);
+                const result = await sendPushNotification(sub, payload);
+                if (result.removed) {
+                  await removePushSubscription(sub.endpoint);
+                  subs.splice(i, 1);
+                } else if (result.ok) {
+                  pushSent++;
+                }
+              }
+            }
+
+            if (pushSent > 0) {
+              logger.push("notification", {
+                account: accountOwnerId, sent: pushSent,
+                fetched: notifications.length,
+              });
+            }
+            if (subs.length === 0) {
+              pushAccounts.delete(accountOwnerId);
+            }
+          }
+        }
+      } catch (err) {
+        logger.error("push notification poll error", {
+          account: accountOwnerId, error: err.message,
+        });
+      }
     }
-    pollTimer = setTimeout(poll, POLL_INTERVAL_MS);
+
+    // Continue polling if there are still active streams or push accounts
+    if (allStreamEntries.length > 0 || pushAccounts.size > 0) {
+      pollTimer = setTimeout(poll, POLL_INTERVAL_MS);
+    } else {
+      pollTimer = null;
+    }
   };
 
   pollTimer = setTimeout(poll, POLL_INTERVAL_MS);
@@ -1516,19 +1279,11 @@ async function loadExistingPushSubscriptions() {
 }
 
 // ─ Start server ──────────────────────────────────────────────────────────
-// Start server after app registration
-registerApp().then(async () => {
-  await loadTemplates();
-  await loadExistingPushSubscriptions();
-  if (pushAccounts.size > 0) startPolling();
-  server.listen(PORT, () => {
-    logger.info(`Hollo Stream Proxy listening on port ${PORT}`);
-    logger.info(`Hollo URL: ${HOLLO_URL}`);
-    logger.info(`Login page: http://localhost:${PORT}/`);
-  });
-}).catch((err) => {
-  logger.error("failed to start: app registration error", { error: err.message });
-  process.exit(1);
+await loadExistingPushSubscriptions();
+if (pushAccounts.size > 0) startPolling();
+server.listen(PORT, () => {
+  logger.info(`Hollo Stream Proxy listening on port ${PORT}`);
+  logger.info(`Hollo URL: ${HOLLO_URL}`);
 });
 
 async function shutdown() {
