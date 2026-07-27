@@ -867,7 +867,9 @@ server.on("upgrade", async (req, socket, head) => {
   const tokenFromQuery = url.searchParams.get("access_token");
   const authHeader = req.headers.authorization || "";
   const tokenFromHeader = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : null;
-  const token = tokenFromQuery || tokenFromHeader;
+  const secProtocol = (req.headers["sec-websocket-protocol"] || "").split(",")[0]?.trim();
+  const tokenFromProtocol = secProtocol || null;
+  const token = tokenFromQuery || tokenFromHeader || tokenFromProtocol;
   const stream = url.searchParams.get("stream") || "user";
   const listId = stream === "list" ? url.searchParams.get("list") : null;
   const tag = (stream === "hashtag" || stream === "hashtag:local")
@@ -876,7 +878,7 @@ server.on("upgrade", async (req, socket, head) => {
 
   logger.stream("upgrade request", {
     ua: req.headers["user-agent"],
-    tokenFrom: tokenFromQuery ? "query" : tokenFromHeader ? "header" : "none",
+    tokenFrom: tokenFromQuery ? "query" : tokenFromHeader ? "header" : tokenFromProtocol ? "protocol" : "none",
     stream,
     listId,
   });
