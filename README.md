@@ -9,14 +9,13 @@ Push 通知および Streaming 非対応の Hollo で、擬似リアルタイム
 
 | 機能 | エンドポイント | 説明 |
 |---|---|---|
-| OAuth ログイン | `/` | Hollo アカウントでログインし、ポーリング用トークンを取得 |
 | WebSocket Streaming | `GET /api/v1/streaming` | Mastodon 互換ストリーミング API。`access_token` 認証 |
 | WebPush Subscription | `/api/v1/push/subscription` | Mastodon 互換プッシュ通知購読 API（CRUD） |
 | Instance API | `/api/v1/instance`, `/api/v2/instance` | Hollo のインスタンス情報をプロキシし `urls.streaming_api` を注入 |
 | Filters | `/api/v1/filters`, `/api/v2/filters` | 空配列 `[]` を返す（Hollo 非対応のため） |
 
-- 認証: `access_token`（WS はクエリパラメータ、HTTP は `Authorization: Bearer`）
-- 通知取得: Hollo REST API（`/api/v1/notifications`, `/api/v1/timelines/home`）をポーリング
+- 認証: 各クライアントが自身の `access_token` を使用
+- 通知取得: 各クライアントのトークンで Hollo REST API をポーリング
 - プッシュ通知: `web-push` ライブラリで VAPID 署名 + 送信
 - 購読情報: PVC 上の JSON ファイルで永続化管理
 
@@ -28,7 +27,7 @@ Push 通知および Streaming 非対応の Hollo で、擬似リアルタイム
 | `HOLLO_INTERNAL_URL` | | `HOLLO_URL` | Hollo の内部 URL（K8s Service DNS 等） |
 | `PORT` | | `3001` | リッスンポート |
 | `POLL_INTERVAL` | | `3000` | ポーリング間隔（ミリ秒） |
-| `DATA_DIR` | | `/data` | セッション・購読データの保存先 |
+| `DATA_DIR` | | `/data` | 購読データの保存先 |
 | `VAPID_PUBLIC_KEY` | | — | WebPush VAPID 公開鍵 |
 | `VAPID_PRIVATE_KEY` | | — | WebPush VAPID 秘密鍵（未設定時はプッシュ配信無効） |
 | `VAPID_SUBJECT` | | `https://example.com` | VAPID subject |
@@ -40,7 +39,7 @@ Push 通知および Streaming 非対応の Hollo で、擬似リアルタイム
 ## コンテナイメージ
 
 ```
-ghcr.io/ntsklab/hollo-stream-proxy:0.11.4
+ghcr.io/ntsklab/hollo-stream-proxy:0.12.0
 ```
 
 ## デプロイ
@@ -70,13 +69,6 @@ kubectl apply -f hollo-stream-proxy.yaml
 `haproxy.conf.sample` を参照し、instance / filters / streaming / push を本プロキシに振り分け。
 
 ## API リファレンス
-
-### OAuth ログイン
-
-```
-GET  /           — ログイン画面
-POST /auth/login — 認証コード送信（code パラメータ）
-```
 
 ### WebSocket Streaming
 
@@ -125,7 +117,7 @@ GET /api/v2/filters  — 空配列
 
 ## アーキテクチャ
 
-Proxy は API ポーリング用に OAuth でトークンを取得し、クライアント接続時はそのクライアントのトークンを `verify_credentials` で検証する。
+各クライアントは自身の `access_token` を使用して接続し、Proxy はそのトークンで Hollo API をポーリングします。複数の Hollo アカウントを持つユーザーも、各アカウントのトークンで個別にポーリングされるため、すべて利用可能です。
 
 ```mermaid
 sequenceDiagram
@@ -133,20 +125,7 @@ sequenceDiagram
     participant Proxy
     participant Hollo
 
-    Note over User,Hollo: ① ポーリング用トークン取得（一度だけ）
-    User->>Proxy: GET /
-    Proxy-->>User: ログインページ
-    User->>Hollo: 認証
-    Hollo-->>User: authorization code
-    User->>Proxy: POST /auth/login (code)
-    Proxy->>Hollo: POST /oauth/token
-    Hollo-->>Proxy: access_token
-    Proxy->>Hollo: GET verify_credentials
-    Hollo-->>Proxy: account info
-    Proxy-->>User: ログイン成功
-    Note over Proxy: ポーリング用トークンを保存
-
-    Note over User,Hollo: ② クライアント接続（随時）
+    Note over User,Hollo: ① クライアント接続（各クライアントの token で）
     User->>Proxy: WS connect (クライアントの token)
     Proxy->>Hollo: GET verify_credentials
     Hollo-->>Proxy: 200 OK / 401 Unauthorized
@@ -156,11 +135,11 @@ sequenceDiagram
         Proxy-->>User: WS close
     end
 
-    Note over User,Hollo: ③ ポーリング（①のトークンで定期実行）
+    Note over User,Hollo: ② ポーリング（各クライアントの token で定期実行）
     loop
-        Proxy->>Hollo: GET /notifications
+        Proxy->>Hollo: GET /notifications (client token)
         Hollo-->>Proxy: JSON
-        Proxy->>Hollo: GET /timelines/home
+        Proxy->>Hollo: GET /timelines/home (client token)
         Hollo-->>Proxy: JSON
     end
     Proxy-->>User: イベント配信

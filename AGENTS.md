@@ -39,12 +39,15 @@ No test framework. Verify via:
 - Token scopes are extracted from X-OAuth-Scopes response header
 - Streaming endpoints require `read` scope; push endpoints require `read` or `push` scope
 - Push subscriptions are scoped per access_token (multi-client support)
-- Dedup uses compound keys (`accountId:streamKey`) per stream type:
-  - `\"user\"` for home timeline / user notification streams
-  - `\"user:notification\"` for notification-only streams
-  - `\"list:<listId>\"` for list timeline streams
-  - `\"public\"`, `\"public:local\"`, `\"public:remote\"` for public timelines
-  - `\"hashtag:<tag>\"`, `\"hashtag:<tag>:local\"` for hashtag timelines
+- Each client connection (WebSocket/SSE) stores its own access_token and polls independently
+- Polling uses each client's token to fetch data from Hollo API
+- Multiple Hollo accounts per user are supported (each with its own token)
+- Dedup uses compound keys (`accountId:token:streamKey`) per stream type:
+  - `"user"` for home timeline / user notification streams
+  - `"user:notification"` for notification-only streams
+  - `"list:<listId>"` for list timeline streams
+  - `"public"`, `"public:local"`, `"public:remote"` for public timelines
+  - `"hashtag:<tag>"`, `"hashtag:<tag>:local"` for hashtag timelines
 - Polling runs on a single timer (`setTimeout` chain), not `setInterval`
 - WebSocket upgrade handles auth via query param `access_token` or `Authorization: Bearer` header
 
