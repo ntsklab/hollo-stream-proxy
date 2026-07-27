@@ -69,10 +69,11 @@ const TOKEN_CACHE_TTL_MS = 30_000;
 const TOKEN_CACHE_NEG_TTL_MS = 30_000;
 
 // ── Token validation via Hollo API ──────────────────────────────────────
-async function verifyToken(token) {
+async function verifyToken(token, testEndpoint = "timeline") {
   if (!token) return null;
 
-  const cached = tokenCache.get(token);
+  const cacheKey = `${token}:${testEndpoint}`;
+  const cached = tokenCache.get(cacheKey);
   if (cached) {
     if (cached.valid && cached.expiresAt > Date.now()) return cached;
     if (!cached.valid && cached.expiresAt > Date.now()) return null;
@@ -82,7 +83,6 @@ async function verifyToken(token) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15_000);
     
-    // Test token by calling verify_credentials (requires read:accounts or profile scope)
     const res = await fetch(`${HOLLO_INTERNAL_URL}/api/v1/accounts/verify_credentials`, {
       headers: { Authorization: `Bearer ${token}` },
       signal: controller.signal,
@@ -90,32 +90,33 @@ async function verifyToken(token) {
     clearTimeout(timeout);
     
     if (!res.ok) {
-      tokenCache.set(token, { valid: false, expiresAt: Date.now() + TOKEN_CACHE_NEG_TTL_MS });
+      tokenCache.set(cacheKey, { valid: false, expiresAt: Date.now() + TOKEN_CACHE_NEG_TTL_MS });
       return null;
     }
     
     const account = await res.json();
     
-    // Now test if the token has read:statuses scope by trying to access home timeline
-    const timelineController = new AbortController();
-    const timelineTimeout = setTimeout(() => timelineController.abort(), 15_000);
-    const timelineRes = await fetch(`${HOLLO_INTERNAL_URL}/api/v1/timelines/home?limit=1`, {
-      headers: { Authorization: `Bearer ${token}` },
-      signal: timelineController.signal,
-    });
-    clearTimeout(timelineTimeout);
+    let testUrl;
+    if (testEndpoint === "notifications") {
+      testUrl = `${HOLLO_INTERNAL_URL}/api/v1/notifications?limit=1`;
+    } else {
+      testUrl = `${HOLLO_INTERNAL_URL}/api/v1/timelines/home?limit=1`;
+    }
     
-    // Determine scopes based on API responses
+    const testController = new AbortController();
+    const testTimeout = setTimeout(() => testController.abort(), 15_000);
+    const testRes = await fetch(testUrl, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: testController.signal,
+    });
+    clearTimeout(testTimeout);
+    
     let scopes = [];
-    if (timelineRes.status === 200) {
-      // Token has read:statuses scope (or parent read scope)
+    if (testRes.status === 200) {
       scopes = ["read", "read:statuses"];
-    } else if (timelineRes.status === 403) {
-      // Token is valid but doesn't have read:statuses scope
-      // It might still have read:accounts (from verify_credentials success)
+    } else if (testRes.status === 403) {
       scopes = ["read:accounts"];
     }
-    // For other status codes (401, etc.), treat as invalid
     
     const info = {
       accountOwnerId: account.id,
@@ -129,7 +130,7 @@ async function verifyToken(token) {
         avatar: account.avatar || "",
       },
     };
-    tokenCache.set(token, info);
+    tokenCache.set(cacheKey, info);
     return info;
   } catch (err) {
     logger.error("token verification failed", { error: err.message });
@@ -436,7 +437,7 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    const tokenInfo = await verifyToken(bearerToken);
+    const tokenInfo = await verifyToken(bearerToken, "notifications");
     if (!tokenInfo?.accountOwnerId) {
       res.writeHead(401, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Unauthorized" }));
@@ -1203,9 +1204,18 @@ function startPolling() {
           continue;
         }
 
-        // Use the first subscription's token for polling
         const accessToken = subs[0].access_token;
         if (!accessToken) continue;
+
+        const tokenInfo = await verifyToken(accessToken, "notifications");
+        if (!tokenInfo) {
+          logger.push("invalid token, removing subscriptions", { account: accountOwnerId });
+          for (const sub of subs) {
+            await removePushSubscription(sub.endpoint);
+          }
+          pushAccounts.delete(accountOwnerId);
+          continue;
+        }
 
         const sinceId = tlMaxIds.get(`notif_${accountOwnerId}_push`) || null;
         const { notifications, latestId } = await fetchNotificationsAPI(accessToken, sinceId);
