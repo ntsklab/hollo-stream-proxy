@@ -648,8 +648,8 @@ const server = createServer(async (req, res) => {
     if (req.method === "GET") {
       const sub = await loadSubscription(id);
       if (!sub) {
-        res.writeHead(404, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Push subscription not found" }));
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({}));
         return;
       }
       res.writeHead(200, { "Content-Type": "application/json" });
