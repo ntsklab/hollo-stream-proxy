@@ -4,7 +4,7 @@
 
 Hollo Stream Proxy is a Node.js (ESM) proxy that adds WebSocket streaming and WebPush support for [Hollo](https://github.com/fedify-dev/hollo), a Mastodon-compatible ActivityPub server that lacks native streaming.
 
-Single-file architecture: all logic lives in `index.js`.
+Modular architecture: `index.js` is the entry point, with logic split into `lib/` modules.
 
 ## Development
 
@@ -34,9 +34,22 @@ No test framework. Verify via:
 
 ## Architecture Notes
 
+### Module Structure
+
+- `index.js` — Entry point, HTTP server, request routing
+- `lib/config.js` — Constants, environment variables
+- `lib/logger.js` — Logging utilities
+- `lib/verifyClientToken.js` — Client token validation with caching
+- `lib/holloApiClient.js` — Hollo API client (timelines, notifications, instance)
+- `lib/pushSubscriptions.js` — Push subscription persistence and management
+- `lib/streaming.js` — WebSocket/SSE state management, push delivery
+- `lib/polling.js` — Polling loop for streaming and push notifications
+
+### Data Flow
+
 - Push subscriptions are persisted as JSON files in `DATA_DIR`
-- Token validation caches results in memory (`tokenCache` Map) with 30s TTL
-- Token scopes are extracted from X-OAuth-Scopes response header
+- Token validation caches results in memory with 30s TTL
+- Token validation is context-aware: tests the actual API that will be used (timeline vs notifications)
 - Streaming endpoints require `read` scope; push endpoints require `read` or `push` scope
 - Push subscriptions are scoped per access_token (multi-client support)
 - Each client connection (WebSocket/SSE) stores its own access_token and polls independently

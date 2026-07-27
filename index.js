@@ -13,406 +13,33 @@
  * - データ取得: 各クライアントのトークンで Hollo API をポーリング
  */
 
-import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { createServer } from "node:http";
-import { WebSocketServer } from "ws";
-import webpush from "web-push";
+import { PORT, DATA_DIR } from "./lib/config.js";
+import { logger } from "./lib/logger.js";
+import { verifyToken } from "./lib/verifyClientToken.js";
+import { fetchInstanceAPI } from "./lib/holloApiClient.js";
+import {
+  saveSubscription,
+  loadSubscription,
+  loadSubscriptions,
+  deleteSubscription,
+  updateAlerts,
+} from "./lib/pushSubscriptions.js";
+import {
+  wss,
+  activeStreams,
+  pushAccounts,
+  VAPID_PUBLIC_KEY,
+} from "./lib/streaming.js";
+import { startPolling, getPollTimer, setPollTimer } from "./lib/polling.js";
 
-// ─ Config ────────────────────────────────────────────────────────────────
-const PORT = parseInt(process.env.PORT || "3001", 10);
-const HOLLO_URL = process.env.HOLLO_URL;
-const HOLLO_INTERNAL_URL = process.env.HOLLO_INTERNAL_URL || HOLLO_URL;
-if (!HOLLO_URL) {
-  console.error("FATAL: HOLLO_URL environment variable is required");
-  process.exit(1);
-}
-const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL || "5000", 10);
-const DATA_DIR = process.env.DATA_DIR || "/data";
-const SUBS_FILE = `${DATA_DIR}/push_subscriptions.json`;
-
-const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || "";
-const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || "";
-const VAPID_SUBJECT = process.env.VAPID_SUBJECT || "https://example.com";
-
-// ── Logging ───────────────────────────────────────────────────────────────
-function ts() {
-  return new Date().toISOString().replace("T", " ").slice(0, 19);
-}
-function log(level, msg, extra) {
-  const line = [`[${ts()}]`, `[${level}]`, msg];
-  if (extra) line.push(JSON.stringify(extra));
-  console.log(line.join(" "));
-}
-const logger = {
-  info: (m, e) => log("info", m, e),
-  warn: (m, e) => log("warn", m, e),
-  error: (m, e) => log("error", m, e),
-  stream: (m, e) => log("stream", m, e),
-  push: (m, e) => log("push", m, e),
-};
-
-// ─ Init web-push ─────────────────────────────────────────────────────────
-if (VAPID_PRIVATE_KEY) {
-  webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
-  logger.info("web-push VAPID initialized");
-} else {
-  logger.warn("VAPID_PRIVATE_KEY not set — push delivery disabled");
-}
-
-// ── Data dir ──────────────────────────────────────────────────────────────
 await mkdir(DATA_DIR, { recursive: true });
 
-// ── Push subscriptions (PVC JSON file) ───────────────────────────────────
-// ── Token cache (DBクエリ削減) ──────────────────────────────────────────
-const tokenCache = new Map(); // token → { accountOwnerId, scopes, valid, expiresAt }
-const TOKEN_CACHE_TTL_MS = 30_000;
-const TOKEN_CACHE_NEG_TTL_MS = 30_000;
-
-// ── Token validation via Hollo API ──────────────────────────────────────
-async function verifyToken(token, testEndpoint = "timeline") {
-  if (!token) return null;
-
-  const cacheKey = `${token}:${testEndpoint}`;
-  const cached = tokenCache.get(cacheKey);
-  if (cached) {
-    if (cached.valid && cached.expiresAt > Date.now()) return cached;
-    if (!cached.valid && cached.expiresAt > Date.now()) return null;
-  }
-
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15_000);
-    
-    const res = await fetch(`${HOLLO_INTERNAL_URL}/api/v1/accounts/verify_credentials`, {
-      headers: { Authorization: `Bearer ${token}` },
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-    
-    if (!res.ok) {
-      tokenCache.set(cacheKey, { valid: false, expiresAt: Date.now() + TOKEN_CACHE_NEG_TTL_MS });
-      return null;
-    }
-    
-    const account = await res.json();
-    
-    let testUrl;
-    if (testEndpoint === "notifications") {
-      testUrl = `${HOLLO_INTERNAL_URL}/api/v1/notifications?limit=1`;
-    } else {
-      testUrl = `${HOLLO_INTERNAL_URL}/api/v1/timelines/home?limit=1`;
-    }
-    
-    const testController = new AbortController();
-    const testTimeout = setTimeout(() => testController.abort(), 15_000);
-    const testRes = await fetch(testUrl, {
-      headers: { Authorization: `Bearer ${token}` },
-      signal: testController.signal,
-    });
-    clearTimeout(testTimeout);
-    
-    let scopes = [];
-    if (testRes.status === 200) {
-      scopes = ["read", "read:statuses"];
-    } else if (testRes.status === 403) {
-      scopes = ["read:accounts"];
-    }
-    
-    const info = {
-      accountOwnerId: account.id,
-      scopes,
-      valid: true,
-      expiresAt: Date.now() + TOKEN_CACHE_TTL_MS,
-      account: {
-        id: account.id,
-        acct: account.acct || account.username,
-        display_name: account.display_name || account.username,
-        avatar: account.avatar || "",
-      },
-    };
-    tokenCache.set(cacheKey, info);
-    return info;
-  } catch (err) {
-    logger.error("token verification failed", { error: err.message });
-    return null;
-  }
-}
-
-// ── Push subscriptions ──────────────────────────────────────────────────
-async function loadSubsFile() {
-  try {
-    return JSON.parse(await readFile(SUBS_FILE, "utf8"));
-  } catch {
-    return { subscriptions: {}, push_since: {} };
-  }
-}
-
-async function saveSubsFile(data) {
-  await mkdir(DATA_DIR, { recursive: true });
-  const tmp = `${SUBS_FILE}.tmp`;
-  await writeFile(tmp, JSON.stringify(data, null, 2));
-  await rename(tmp, SUBS_FILE);
-}
-
-async function saveSubscription(accountId, sub, alertsData, accessToken) {
-  const data = await loadSubsFile();
-  if (!data.subscriptions[accountId]) data.subscriptions[accountId] = [];
-
-  const idx = data.subscriptions[accountId].findIndex(
-    (s) => s.endpoint === sub.endpoint,
-  );
-
-  const entry = {
-    endpoint: sub.endpoint,
-    keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth },
-    access_token: accessToken,
-    alerts: {
-      mention: alertsData.mention !== false,
-      status: alertsData.status !== false,
-      reblog: alertsData.reblog !== false,
-      favourite: alertsData.favourite !== false,
-      follow: alertsData.follow !== false,
-      follow_request: alertsData.follow_request !== false,
-      poll: alertsData.poll !== false,
-      update: alertsData.update !== false,
-      admin_sign_up: alertsData.admin_sign_up !== false,
-      admin_report: alertsData.admin_report !== false,
-      severed_relationships: alertsData.severed_relationships !== false,
-      reaction: alertsData.reaction !== false,
-    },
-    created_at: new Date().toISOString(),
-  };
-
-  if (idx >= 0) {
-    data.subscriptions[accountId][idx] = entry;
-  } else {
-    data.subscriptions[accountId].push(entry);
-  }
-
-  await saveSubsFile(data);
-}
-
-async function loadSubscription(accountId, accessToken) {
-  const data = await loadSubsFile();
-  const subs = data.subscriptions[accountId];
-  if (!subs || subs.length === 0) return null;
-  return subs.find(s => s.access_token === accessToken) || null;
-}
-
-async function loadSubscriptions(accountId) {
-  const data = await loadSubsFile();
-  return data.subscriptions[accountId] || [];
-}
-
-async function deleteSubscription(accountId, accessToken) {
-  const data = await loadSubsFile();
-  const subs = data.subscriptions[accountId];
-  if (!subs) return;
-  data.subscriptions[accountId] = subs.filter(s => s.access_token !== accessToken);
-  if (data.subscriptions[accountId].length === 0) {
-    delete data.subscriptions[accountId];
-  }
-  await saveSubsFile(data);
-}
-
-async function updateAlerts(accountId, alertsData, accessToken) {
-  const data = await loadSubsFile();
-  const subs = data.subscriptions[accountId];
-  if (!subs) return;
-  const sub = subs.find(s => s.access_token === accessToken);
-  if (!sub) return;
-  sub.alerts = {
-    mention: alertsData.mention !== false,
-    status: alertsData.status !== false,
-    reblog: alertsData.reblog !== false,
-    favourite: alertsData.favourite !== false,
-    follow: alertsData.follow !== false,
-    follow_request: alertsData.follow_request !== false,
-    poll: alertsData.poll !== false,
-    update: alertsData.update !== false,
-    admin_sign_up: alertsData.admin_sign_up !== false,
-    admin_report: alertsData.admin_report !== false,
-    severed_relationships: alertsData.severed_relationships !== false,
-    reaction: alertsData.reaction !== false,
-  };
-  await saveSubsFile(data);
-}
-
-async function removePushSubscription(endpoint) {
-  const data = await loadSubsFile();
-  for (const accountId of Object.keys(data.subscriptions)) {
-    data.subscriptions[accountId] = data.subscriptions[accountId].filter(
-      (s) => s.endpoint !== endpoint,
-    );
-    if (data.subscriptions[accountId].length === 0) {
-      delete data.subscriptions[accountId];
-    }
-  }
-  await saveSubsFile(data);
-  logger.push("subscription removed", { endpoint });
-}
-
-// ── Mastodon API client ─────────────────────────────────────────────────
-async function fetchHomeTimelineAPI(accessToken, sinceId = null) {
-  const params = new URLSearchParams({ limit: "40" });
-  if (sinceId) params.set("since_id", sinceId);
-
-  const res = await fetch(
-    `${HOLLO_URL}/api/v1/timelines/home?${params}`,
-    { headers: { Authorization: `Bearer ${accessToken}` } },
-  );
-
-  if (!res.ok) {
-    logger.error("timeline API error", { status: res.status });
-    return { statuses: [], latestId: null };
-  }
-
-  const statuses = await res.json();
-
-  // 新着投稿の中で最も新しいIDを次回のsince_idとして保存
-  const latestId = statuses.length > 0 ? statuses[0].id : null;
-
-  return { statuses, latestId };
-}
-
-async function fetchListTimelineAPI(accessToken, listId, sinceId = null) {
-  const params = new URLSearchParams({ limit: "40" });
-  if (sinceId) params.set("since_id", sinceId);
-
-  const res = await fetch(
-    `${HOLLO_URL}/api/v1/timelines/list/${listId}?${params}`,
-    { headers: { Authorization: `Bearer ${accessToken}` } },
-  );
-
-  if (!res.ok) {
-    logger.error("list timeline API error", { status: res.status, listId });
-    return { statuses: [], latestId: null };
-  }
-
-  const statuses = await res.json();
-  const latestId = statuses.length > 0 ? statuses[0].id : null;
-
-  return { statuses, latestId };
-}
-
-async function fetchInstanceAPI(req, apiVersion = "v1") {
-  const res = await fetch(`${HOLLO_INTERNAL_URL}/api/${apiVersion}/instance`, {
-    headers: { Accept: "application/json" },
-  });
-  if (!res.ok) {
-    throw new Error(`instance API error: ${res.status}`);
-  }
-  const data = await res.json();
-
-  // 公開ドメインをリクエストホストに戻す（内部 URL 経由で取得すると Hollo が内部ホスト名を返す）
-  const publicHost = req.headers.host || "localhost";
-  const publicDomain = publicHost.split(":")[0];
-  const streamingUrl = `wss://${publicHost}`;
-
-  if (apiVersion === "v2") {
-    data.domain = publicDomain;
-    if (!data.configuration) data.configuration = {};
-    if (!data.configuration.urls) data.configuration.urls = {};
-    data.configuration.urls.streaming = streamingUrl;
-  } else {
-    data.uri = publicDomain;
-    if (!data.urls) data.urls = {};
-    data.urls.streaming_api = streamingUrl;
-  }
-
-  // Hollo は内部 URL 経由で取得すると内部ホスト名を含むフィールドを返すので、公開ドメインに差し替える
-  data.title = publicDomain;
-  if (data.short_description !== undefined) {
-    data.short_description = `A Hollo instance at ${publicDomain}`;
-  }
-  data.description = `A Hollo instance at ${publicDomain}`;
-  if (data.thumbnail && typeof data.thumbnail === "string") {
-    data.thumbnail = data.thumbnail.replace(/^https?:\/\/[^/]+/, `https://${publicHost}`);
-  } else if (data.thumbnail && typeof data.thumbnail === "object" && typeof data.thumbnail.url === "string") {
-    data.thumbnail.url = data.thumbnail.url.replace(/^https?:\/\/[^/]+/, `https://${publicHost}`);
-  }
-  if (Array.isArray(data.icon)) {
-    for (const icon of data.icon) {
-      if (icon && typeof icon.src === "string") {
-        icon.src = icon.src.replace(/^https?:\/\/[^/]+/, `https://${publicHost}`);
-      }
-    }
-  }
-
-  return data;
-}
-
-async function fetchPublicTimelineAPI(accessToken, { local = false, remote = false, sinceId = null } = {}) {
-  const params = new URLSearchParams({ limit: "40" });
-  if (local) params.set("local", "true");
-  if (remote) params.set("remote", "true");
-  if (sinceId) params.set("since_id", sinceId);
-
-  const res = await fetch(
-    `${HOLLO_URL}/api/v1/timelines/public?${params}`,
-    { headers: { Authorization: `Bearer ${accessToken}` } },
-  );
-
-  if (!res.ok) {
-    logger.error("public timeline API error", { status: res.status, local, remote });
-    return { statuses: [], latestId: null };
-  }
-
-  const statuses = await res.json();
-  const latestId = statuses.length > 0 ? statuses[0].id : null;
-  return { statuses, latestId };
-}
-
-async function fetchHashtagTimelineAPI(accessToken, tag, { local = false, sinceId = null } = {}) {
-  const params = new URLSearchParams({ limit: "40" });
-  if (local) params.set("local", "true");
-  if (sinceId) params.set("since_id", sinceId);
-
-  const res = await fetch(
-    `${HOLLO_URL}/api/v1/timelines/tag/${encodeURIComponent(tag)}?${params}`,
-    { headers: { Authorization: `Bearer ${accessToken}` } },
-  );
-
-  if (!res.ok) {
-    logger.error("hashtag timeline API error", { status: res.status, tag, local });
-    return { statuses: [], latestId: null };
-  }
-
-  const statuses = await res.json();
-  const latestId = statuses.length > 0 ? statuses[0].id : null;
-  return { statuses, latestId };
-}
-
-async function fetchNotificationsAPI(accessToken, sinceId = null) {
-  const params = new URLSearchParams({ limit: "30" });
-  if (sinceId) params.set("since_id", sinceId);
-
-  const res = await fetch(
-    `${HOLLO_URL}/api/v1/notifications?${params}`,
-    { headers: { Authorization: `Bearer ${accessToken}` } },
-  );
-
-  if (!res.ok) {
-    logger.error("notifications API error", { status: res.status });
-    return { notifications: [], latestId: null };
-  }
-
-  const notifications = await res.json();
-
-  let latestId = null;
-  if (notifications.length > 0) {
-    latestId = notifications[0].id;
-  }
-
-  return { notifications, latestId };
-}
-
-// ── Server ────────────────────────────────────────────────────────────────
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
   const path = url.pathname;
 
-  // CORS
   if (path.startsWith("/api/")) {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
@@ -424,7 +51,6 @@ const server = createServer(async (req, res) => {
     }
   }
 
-  // ── Push subscription API ────────────────────────────────────────────
   if (path === "/api/v1/push/subscription") {
     const authHeader = req.headers.authorization || "";
     const bearerToken = authHeader.startsWith("Bearer ")
@@ -516,7 +142,6 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  // ── Mastodon instance info (inject streaming URL) ─────────────────────
   if ((path === "/api/v1/instance" || path === "/api/v2/instance") && req.method === "GET") {
     try {
       const apiVersion = path.startsWith("/api/v2") ? "v2" : "v1";
@@ -531,7 +156,6 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  // ── Mastodon filters (Hollo does not support; return empty) ───────────
   if (path === "/api/v1/filters") {
     if (req.method === "OPTIONS") {
       res.writeHead(204);
@@ -543,14 +167,12 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  // ── Health check ──────────────────────────────────────────────────────
   if (path === "/health" && req.method === "GET") {
     res.writeHead(200, { "Content-Type": "text/plain" });
     res.end("OK");
     return;
   }
 
-  // ── SSE Streaming (HTTP long-lived) ─────────────────────────────────
   if (req.method === "GET" && path.startsWith("/api/v1/streaming/")) {
     const ssePath = path.replace("/api/v1/streaming/", "");
     const tokenFromQuery = url.searchParams.get("access_token");
@@ -651,22 +273,9 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  // ── Default: 404 ─────────────────────────────────────────────────────
   res.writeHead(404, { "Content-Type": "application/json" });
   res.end(JSON.stringify({ error: "Not found" }));
 });
-
-// ── WebSocket server ────────────────────────────────────────────────────
-const wss = new WebSocketServer({ noServer: true });
-wss.on("error", (err) => {
-  logger.error("websocket server error", { error: err.message });
-});
-const activeStreams = new Map();
-const pushAccounts = new Set();
-const recentlySentNotifications = new Map();
-const sentTlPosts = new Map();
-const tlMaxIds = new Map();
-const DEDUP_WINDOW_MS = 60_000;
 
 server.on("upgrade", async (req, socket, head) => {
   let url;
@@ -812,494 +421,8 @@ server.on("upgrade", async (req, socket, head) => {
   }
 });
 
-function markNotificationSent(accountOwnerId, notificationId, streamKey) {
-  const compoundKey = `${accountOwnerId}:${streamKey}`;
-  const now = Date.now();
-  if (!recentlySentNotifications.has(compoundKey)) {
-    recentlySentNotifications.set(compoundKey, new Map());
-  }
-  const map = recentlySentNotifications.get(compoundKey);
-  for (const [id, ts] of map.entries()) {
-    if (now - ts > DEDUP_WINDOW_MS) map.delete(id);
-  }
-  if (map.has(notificationId)) return true;
-  map.set(notificationId, now);
-  return false;
-}
-
-function markTlPostSent(accountOwnerId, postId, streamKey) {
-  const compoundKey = `${accountOwnerId}:${streamKey}`;
-  if (!sentTlPosts.has(compoundKey)) {
-    sentTlPosts.set(compoundKey, new Set());
-  }
-  const set = sentTlPosts.get(compoundKey);
-  if (set.has(String(postId))) return true;
-  set.add(String(postId));
-  return false;
-}
-
-// Hollo の status オブジェクトから、Mastodon クライアントが誤認識しやすい
-// 非標準フィールドを取り除く
-function sanitizeStatus(status) {
-  if (!status || typeof status !== "object") return status;
-  const sanitized = { ...status };
-  delete sanitized.quote_id;
-  delete sanitized.quote;
-  delete sanitized.quote_approval;
-  delete sanitized.quotes_count;
-  delete sanitized.fedibird_capabilities;
-  if (sanitized.filtered === null || sanitized.filtered === undefined) {
-    sanitized.filtered = [];
-  }
-  if (sanitized.account && typeof sanitized.account === "object") {
-    const account = { ...sanitized.account };
-    delete account.fedibird_capabilities;
-    sanitized.account = account;
-  }
-  if (sanitized.reblog && typeof sanitized.reblog === "object") {
-    sanitized.reblog = sanitizeStatus(sanitized.reblog);
-  }
-  if (sanitized.quote && typeof sanitized.quote === "object") {
-    sanitized.quote = sanitizeStatus(sanitized.quote);
-  }
-  return sanitized;
-}
-
-function sanitizeNotification(notification) {
-  if (!notification || typeof notification !== "object") return notification;
-  const sanitized = { ...notification };
-  if (sanitized.status) {
-    sanitized.status = sanitizeStatus(sanitized.status);
-  }
-  return sanitized;
-}
-
-function shouldSendPush(alerts, notification) {
-  const type = notification.type;
-  // Hollo の emoji_reaction は reaction / favourite アラートで制御
-  if (type === "emoji_reaction" || type === "reaction") {
-    return alerts.reaction !== false || alerts.favourite !== false;
-  }
-  const key = type.replace(/\./g, "_");
-  return alerts[key] !== false;
-}
-
-function buildPushPayload(notification, accessToken) {
-  const icon = notification.account?.avatar || notification.account?.avatar_static || "";
-  return {
-    access_token: accessToken,
-    notification_id: String(notification.id),
-    notification_type: notification.type,
-    icon,
-    title: "",
-    body: "",
-    notification,
-  };
-}
-
-let pollTimer = null;
-
-function startPolling() {
-  if (pollTimer) return;
-
-  const poll = async () => {
-    // Collect all active stream entries
-    const allStreamEntries = [];
-    for (const streams of activeStreams.values()) {
-      for (const s of streams) {
-        allStreamEntries.push(s);
-      }
-    }
-
-    // If no active streams and no push accounts, stop polling
-    if (allStreamEntries.length === 0 && pushAccounts.size === 0) {
-      pollTimer = null;
-      return;
-    }
-
-    // Poll for each stream entry independently
-    for (const streamEntry of allStreamEntries) {
-      const accessToken = streamEntry.token;
-      if (!accessToken) continue;
-
-      const subscriptions = streamEntry.subscriptions;
-      const hasUserStream = subscriptions.has("user") || subscriptions.has("user:notification");
-      const hasTimelineStream = subscriptions.has("user");
-      const listSubs = [...subscriptions.values()].filter((sub) => sub.stream === "list" && sub.listId);
-      const listIds = [...new Set(listSubs.map((s) => s.listId))];
-
-      // Get account ID from token
-      const tokenInfo = await verifyToken(accessToken);
-      if (!tokenInfo?.accountOwnerId) continue;
-      const accountOwnerId = tokenInfo.accountOwnerId;
-
-      // Notifications
-      if (hasUserStream) {
-        try {
-          const sinceId = tlMaxIds.get(`notif_${accountOwnerId}_${accessToken}`) || null;
-          const { notifications, latestId } = await fetchNotificationsAPI(accessToken, sinceId);
-
-          if (notifications.length > 0) {
-            if (latestId) tlMaxIds.set(`notif_${accountOwnerId}_${accessToken}`, latestId);
-
-            if (!sinceId) {
-              logger.stream("notification checkpoint set", {
-                account: accountOwnerId, latestId, count: notifications.length,
-              });
-            } else {
-              let wsSent = 0;
-              let wsSkipped = 0;
-
-              for (const n of notifications) {
-                const sanitized = sanitizeNotification(n);
-                if (!subscriptions.has("user") && !subscriptions.has("user:notification")) continue;
-
-                const notifStream = subscriptions.has("user:notification") ? "user:notification" : "user";
-                if (markNotificationSent(`${accountOwnerId}_${accessToken}`, String(n.id), notifStream)) {
-                  wsSkipped++;
-                  continue;
-                }
-
-                const eventJson = JSON.stringify({
-                  stream: [notifStream],
-                  event: "notification",
-                  payload: JSON.stringify(sanitized),
-                });
-                if (streamEntry.sse) { streamEntry.send(eventJson); wsSent++; }
-                else if (streamEntry.ws?.readyState === 1) { try { streamEntry.ws.send(eventJson); wsSent++; } catch (_) {} }
-              }
-
-              if (wsSent > 0 || wsSkipped > 0) {
-                logger.stream("notification", {
-                  account: accountOwnerId, sent: wsSent, skipped: wsSkipped,
-                  fetched: notifications.length,
-                });
-              }
-            }
-          }
-        } catch (err) {
-          logger.error("notification poll error", {
-            account: accountOwnerId, error: err.message,
-          });
-        }
-      }
-
-      // Timeline
-      if (hasTimelineStream) {
-        try {
-          const sinceId = tlMaxIds.get(`${accountOwnerId}_${accessToken}`) || null;
-          const { statuses, latestId } = await fetchHomeTimelineAPI(accessToken, sinceId);
-
-          if (statuses.length > 0) {
-            if (latestId) tlMaxIds.set(`${accountOwnerId}_${accessToken}`, latestId);
-
-            if (!sinceId) {
-              logger.stream("timeline checkpoint set", {
-                account: accountOwnerId, latestId, count: statuses.length,
-              });
-            } else {
-              let sent = 0;
-              let skipped = 0;
-
-              for (const status of statuses.reverse()) {
-                if (markTlPostSent(`${accountOwnerId}_${accessToken}`, String(status.id), "user")) {
-                  skipped++;
-                  continue;
-                }
-
-                if (subscriptions.has("user")) {
-                  const eventJson = JSON.stringify({
-                    stream: ["user"],
-                    event: "update",
-                    payload: JSON.stringify(sanitizeStatus(status)),
-                  });
-                  if (streamEntry.sse) { streamEntry.send(eventJson); sent++; }
-                  else if (streamEntry.ws?.readyState === 1) { try { streamEntry.ws.send(eventJson); sent++; } catch (_) {} }
-                }
-              }
-
-              if (sent > 0 || skipped > 0) {
-                logger.stream("update", {
-                  account: accountOwnerId, count: statuses.length, sent, skipped,
-                });
-              }
-            }
-          }
-        } catch (err) {
-          logger.error("timeline poll error", {
-            account: accountOwnerId, error: err.message,
-          });
-        }
-      }
-
-      // List Timelines
-      for (const lid of listIds) {
-        try {
-          const sinceId = tlMaxIds.get(`list:${lid}_${accessToken}`) || null;
-          const { statuses, latestId } = await fetchListTimelineAPI(accessToken, lid, sinceId);
-
-          if (statuses.length > 0) {
-            if (latestId) tlMaxIds.set(`list:${lid}_${accessToken}`, latestId);
-
-            if (!sinceId) {
-              logger.stream("list timeline checkpoint set", {
-                account: accountOwnerId, listId: lid, latestId, count: statuses.length,
-              });
-            } else {
-              let sent = 0;
-              let skipped = 0;
-
-              for (const status of statuses.reverse()) {
-                if (markTlPostSent(`${accountOwnerId}_${accessToken}`, String(status.id), `list:${lid}`)) {
-                  skipped++;
-                  continue;
-                }
-
-                const sub = subscriptions.get(`list:${lid}`);
-                if (sub) {
-                  const eventJson = JSON.stringify({
-                    stream: ["list", lid],
-                    event: "update",
-                    payload: JSON.stringify(sanitizeStatus(status)),
-                  });
-                  if (streamEntry.sse) { streamEntry.send(eventJson); sent++; }
-                  else if (streamEntry.ws?.readyState === 1) { try { streamEntry.ws.send(eventJson); sent++; } catch (_) {} }
-                }
-              }
-
-              if (sent > 0 || skipped > 0) {
-                logger.stream("list update", {
-                  account: accountOwnerId, listId: lid, count: statuses.length, sent, skipped,
-                });
-              }
-            }
-          }
-        } catch (err) {
-          logger.error("list timeline poll error", {
-            account: accountOwnerId, listId: lid, error: err.message,
-          });
-        }
-      }
-
-      // Public timelines
-      const publicVariants = new Map();
-      ["public", "public:local", "public:remote"].forEach((st) => {
-        if (subscriptions.has(st)) {
-          publicVariants.set(st, { local: st === "public:local", remote: st === "public:remote" });
-        }
-      });
-      for (const [streamKey, { local, remote }] of publicVariants) {
-        try {
-          const sinceId = tlMaxIds.get(`${accountOwnerId}:${streamKey}_${accessToken}`) || null;
-          const { statuses, latestId } = await fetchPublicTimelineAPI(accessToken, { local, remote, sinceId });
-
-          if (statuses.length > 0) {
-            if (latestId) tlMaxIds.set(`${accountOwnerId}:${streamKey}_${accessToken}`, latestId);
-
-            if (!sinceId) {
-              logger.stream("public timeline checkpoint set", {
-                account: accountOwnerId, stream: streamKey, latestId, count: statuses.length,
-              });
-            } else {
-              let sent = 0;
-              let skipped = 0;
-
-              for (const status of statuses.reverse()) {
-                if (markTlPostSent(`${accountOwnerId}_${accessToken}`, String(status.id), streamKey)) {
-                  skipped++;
-                  continue;
-                }
-
-                if (subscriptions.has(streamKey)) {
-                  const eventJson = JSON.stringify({
-                    stream: [streamKey],
-                    event: "update",
-                    payload: JSON.stringify(sanitizeStatus(status)),
-                  });
-                  if (streamEntry.sse) { streamEntry.send(eventJson); sent++; }
-                  else if (streamEntry.ws?.readyState === 1) { try { streamEntry.ws.send(eventJson); sent++; } catch (_) {} }
-                }
-              }
-
-              if (sent > 0 || skipped > 0) {
-                logger.stream("public timeline", {
-                  account: accountOwnerId, stream: streamKey, sent, skipped, fetched: statuses.length,
-                });
-              }
-            }
-          }
-        } catch (err) {
-          logger.error("public timeline poll error", {
-            account: accountOwnerId, stream: streamKey, error: err.message,
-          });
-        }
-      }
-
-      // Hashtag timelines
-      const hashtagGroups = new Map();
-      for (const sub of subscriptions.values()) {
-        if ((sub.stream === "hashtag" || sub.stream === "hashtag:local") && sub.tag) {
-          const key = `${sub.stream}:${sub.tag}`;
-          if (!hashtagGroups.has(key)) {
-            hashtagGroups.set(key, { stream: sub.stream, tag: sub.tag, local: sub.stream === "hashtag:local" });
-          }
-        }
-      }
-      for (const [key, { stream: streamKey, tag: htTag, local }] of hashtagGroups) {
-        try {
-          const sinceId = tlMaxIds.get(`${accountOwnerId}:hashtag:${htTag}${local ? ":local" : ""}_${accessToken}`) || null;
-          const { statuses, latestId } = await fetchHashtagTimelineAPI(accessToken, htTag, { local, sinceId });
-
-          if (statuses.length > 0) {
-            const dedupKey = `${accountOwnerId}:hashtag:${htTag}${local ? ":local" : ""}_${accessToken}`;
-            if (latestId) tlMaxIds.set(dedupKey, latestId);
-
-            if (!sinceId) {
-              logger.stream("hashtag timeline checkpoint set", {
-                account: accountOwnerId, tag: htTag, local, latestId, count: statuses.length,
-              });
-            } else {
-              let sent = 0;
-              let skipped = 0;
-
-              for (const status of statuses.reverse()) {
-                if (markTlPostSent(`${accountOwnerId}_${accessToken}`, String(status.id), dedupKey)) {
-                  skipped++;
-                  continue;
-                }
-
-                const sub = subscriptions.get(`${streamKey}:${htTag}`);
-                if (sub && sub.tag === htTag) {
-                  const eventJson = JSON.stringify({
-                    stream: [streamKey, htTag],
-                    event: "update",
-                    payload: JSON.stringify(sanitizeStatus(status)),
-                  });
-                  if (streamEntry.sse) { streamEntry.send(eventJson); sent++; }
-                  else if (streamEntry.ws?.readyState === 1) { try { streamEntry.ws.send(eventJson); sent++; } catch (_) {} }
-                }
-              }
-
-              if (sent > 0 || skipped > 0) {
-                logger.stream("hashtag timeline", {
-                  account: accountOwnerId, tag: htTag, local, sent, skipped, fetched: statuses.length,
-                });
-              }
-            }
-          }
-        } catch (err) {
-          logger.error("hashtag timeline poll error", {
-            account: accountOwnerId, tag: htTag, local, error: err.message,
-          });
-        }
-      }
-    }
-
-    // Poll for push subscriptions
-    for (const accountOwnerId of pushAccounts) {
-      try {
-        const subs = await loadSubscriptions(accountOwnerId);
-        if (subs.length === 0) {
-          pushAccounts.delete(accountOwnerId);
-          continue;
-        }
-
-        const accessToken = subs[0].access_token;
-        if (!accessToken) continue;
-
-        const tokenInfo = await verifyToken(accessToken, "notifications");
-        if (!tokenInfo) {
-          logger.push("invalid token, removing subscriptions", { account: accountOwnerId });
-          for (const sub of subs) {
-            await removePushSubscription(sub.endpoint);
-          }
-          pushAccounts.delete(accountOwnerId);
-          continue;
-        }
-
-        const sinceId = tlMaxIds.get(`notif_${accountOwnerId}_push`) || null;
-        const { notifications, latestId } = await fetchNotificationsAPI(accessToken, sinceId);
-
-        if (notifications.length > 0) {
-          if (latestId) tlMaxIds.set(`notif_${accountOwnerId}_push`, latestId);
-
-          if (!sinceId) {
-            logger.stream("notification checkpoint set", {
-              account: accountOwnerId, latestId, count: notifications.length,
-            });
-          } else {
-            let pushSent = 0;
-
-            for (const n of notifications) {
-              const sanitized = sanitizeNotification(n);
-
-              for (let i = subs.length - 1; i >= 0; i--) {
-                const sub = subs[i];
-                if (!shouldSendPush(sub.alerts, sanitized)) continue;
-
-                const payload = buildPushPayload(sanitized, sub.access_token);
-                const result = await sendPushNotification(sub, payload);
-                if (result.removed) {
-                  await removePushSubscription(sub.endpoint);
-                  subs.splice(i, 1);
-                } else if (result.ok) {
-                  pushSent++;
-                }
-              }
-            }
-
-            if (pushSent > 0) {
-              logger.push("notification", {
-                account: accountOwnerId, sent: pushSent,
-                fetched: notifications.length,
-              });
-            }
-            if (subs.length === 0) {
-              pushAccounts.delete(accountOwnerId);
-            }
-          }
-        }
-      } catch (err) {
-        logger.error("push notification poll error", {
-          account: accountOwnerId, error: err.message,
-        });
-      }
-    }
-
-    // Continue polling if there are still active streams or push accounts
-    if (allStreamEntries.length > 0 || pushAccounts.size > 0) {
-      pollTimer = setTimeout(poll, POLL_INTERVAL_MS);
-    } else {
-      pollTimer = null;
-    }
-  };
-
-  pollTimer = setTimeout(poll, POLL_INTERVAL_MS);
-}
-
-async function sendPushNotification(sub, payload) {
-  if (!VAPID_PRIVATE_KEY) {
-    return { ok: false, code: null, message: "VAPID_PRIVATE_KEY not configured" };
-  }
-  try {
-    await webpush.sendNotification(
-      { endpoint: sub.endpoint, keys: sub.keys },
-      JSON.stringify(payload),
-    );
-    return { ok: true };
-  } catch (err) {
-    if (err.statusCode === 410 || err.statusCode === 404) {
-      logger.push("expired subscription removed", { endpoint: sub.endpoint });
-      return { removed: true };
-    }
-    logger.error("push send failed", {
-      endpoint: sub.endpoint, code: err.statusCode, message: err.message,
-    });
-    return { ok: false, code: err.statusCode, message: err.message };
-  }
-}
-
 async function loadExistingPushSubscriptions() {
+  const { loadSubsFile } = await import("./lib/pushSubscriptions.js");
   const data = await loadSubsFile();
   for (const accountId of Object.keys(data.subscriptions || {})) {
     if (data.subscriptions[accountId].length > 0) {
@@ -1311,17 +434,17 @@ async function loadExistingPushSubscriptions() {
   }
 }
 
-// ─ Start server ──────────────────────────────────────────────────────────
 await loadExistingPushSubscriptions();
 if (pushAccounts.size > 0) startPolling();
 server.listen(PORT, () => {
   logger.info(`Hollo Stream Proxy listening on port ${PORT}`);
-  logger.info(`Hollo URL: ${HOLLO_URL}`);
+  logger.info(`Hollo URL: ${process.env.HOLLO_URL}`);
 });
 
 async function shutdown() {
   logger.info("shutting down...");
-  clearTimeout(pollTimer);
+  const timer = getPollTimer();
+  if (timer) clearTimeout(timer);
   const forceExit = setTimeout(() => {
     logger.warn("forced shutdown: existing connections remain");
     process.exit(1);
