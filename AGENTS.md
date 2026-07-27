@@ -54,6 +54,7 @@ No test framework. Verify via:
 ## Git Workflow
 
 - `git commit` は適宜行う（变更がまとまったら都度コミットする）
+- `git push` は行わない（ユーザーが確認後に行う）
 - コミットメッセージは変更内容を簡潔に記述する（例: `fix: ...`, `feat: ...`, `refactor: ...`）
   - 破壊的変更がなければ patch increment（`0.9.x` → `0.9.x+1`）
   - 新機能追加は minor increment（`0.9.x` → `0.10.0`）
