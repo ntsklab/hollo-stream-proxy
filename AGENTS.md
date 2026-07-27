@@ -71,9 +71,10 @@ No test framework. Verify via:
 - コミットメッセージは変更内容を簡潔に記述する（例: `fix: ...`, `feat: ...`, `refactor: ...`）
   - 破壊的変更がなければ patch increment（`0.9.x` → `0.9.x+1`）
   - 新機能追加は minor increment（`0.9.x` → `0.10.0`）
-  - version bump 時は下記ファイルのバージョン表記も合わせて更新する:
-    - `README.md` — コンテナイメージのタグ
-    - `hollo-stream-proxy.yaml.sample` — Deployment のイメージタグ
+   - version bump 時は下記ファイルのバージョン表記も合わせて更新する:
+     - `package-lock.json` — `version` フィールド（2箇所）
+     - `README.md` — コンテナイメージのタグ
+     - `hollo-stream-proxy.yaml.sample` — Deployment のイメージタグ
 
 ## Key Patterns
 
