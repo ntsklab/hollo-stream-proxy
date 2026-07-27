@@ -81,18 +81,42 @@ async function verifyToken(token) {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15_000);
+    
+    // Test token by calling verify_credentials (requires read:accounts or profile scope)
     const res = await fetch(`${HOLLO_INTERNAL_URL}/api/v1/accounts/verify_credentials`, {
       headers: { Authorization: `Bearer ${token}` },
       signal: controller.signal,
     });
     clearTimeout(timeout);
+    
     if (!res.ok) {
       tokenCache.set(token, { valid: false, expiresAt: Date.now() + TOKEN_CACHE_NEG_TTL_MS });
       return null;
     }
+    
     const account = await res.json();
-    const scopesStr = res.headers.get("X-OAuth-Scopes") || res.headers.get("x-oauth-scopes") || "";
-    const scopes = scopesStr.split(/\s+/).filter(Boolean);
+    
+    // Now test if the token has read:statuses scope by trying to access home timeline
+    const timelineController = new AbortController();
+    const timelineTimeout = setTimeout(() => timelineController.abort(), 15_000);
+    const timelineRes = await fetch(`${HOLLO_INTERNAL_URL}/api/v1/timelines/home?limit=1`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: timelineController.signal,
+    });
+    clearTimeout(timelineTimeout);
+    
+    // Determine scopes based on API responses
+    let scopes = [];
+    if (timelineRes.status === 200) {
+      // Token has read:statuses scope (or parent read scope)
+      scopes = ["read", "read:statuses"];
+    } else if (timelineRes.status === 403) {
+      // Token is valid but doesn't have read:statuses scope
+      // It might still have read:accounts (from verify_credentials success)
+      scopes = ["read:accounts"];
+    }
+    // For other status codes (401, etc.), treat as invalid
+    
     const info = {
       accountOwnerId: account.id,
       scopes,
