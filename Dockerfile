@@ -6,7 +6,6 @@ COPY package.json ./
 RUN npm install --omit=dev
 
 COPY index.js ./
-COPY pages/ ./pages/
 
 RUN mkdir -p /data && chown node:node /data
 
