@@ -28,13 +28,13 @@ No test framework. Verify via:
 - **No transpilation**: raw `.js`, no TypeScript
 - **No comments** unless explicitly requested
 - **No external frameworks**: only `ws` and `web-push` as dependencies
-- **Logging**: use `logger.info/warn/error/stream/push/auth` (not `console.log`)
+- **Logging**: use `logger.info/warn/error/stream/push` (not `console.log`)
 - **Naming**: camelCase for variables/functions, UPPER_SNAKE for constants
 - **Async**: prefer `async/await`, avoid callbacks
 
 ## Architecture Notes
 
-- OAuth sessions and push subscriptions are persisted as JSON files in `DATA_DIR`
+- Push subscriptions are persisted as JSON files in `DATA_DIR`
 - Token validation caches results in memory (`tokenCache` Map) with 30s TTL
 - Token scopes are extracted from X-OAuth-Scopes response header
 - Streaming endpoints require `read` scope; push endpoints require `read` or `push` scope
@@ -49,7 +49,7 @@ No test framework. Verify via:
   - `"public"`, `"public:local"`, `"public:remote"` for public timelines
   - `"hashtag:<tag>"`, `"hashtag:<tag>:local"` for hashtag timelines
 - Polling runs on a single timer (`setTimeout` chain), not `setInterval`
-- WebSocket upgrade handles auth via query param `access_token` or `Authorization: Bearer` header
+- WebSocket upgrade handles auth via query param `access_token`, `Authorization: Bearer` header, or `Sec-WebSocket-Protocol` header
 
 ## Git Workflow
 

@@ -49,7 +49,6 @@ const logger = {
   error: (m, e) => log("error", m, e),
   stream: (m, e) => log("stream", m, e),
   push: (m, e) => log("push", m, e),
-  auth: (m, e) => log("auth", m, e),
 };
 
 // ─ Init web-push ─────────────────────────────────────────────────────────
@@ -389,7 +388,7 @@ const server = createServer(async (req, res) => {
   const path = url.pathname;
 
   // CORS
-  if (path.startsWith("/api/") || path.startsWith("/auth/")) {
+  if (path.startsWith("/api/")) {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
