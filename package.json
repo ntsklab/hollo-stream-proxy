@@ -1,6 +1,6 @@
 {
   "name": "hollo-stream-proxy",
-  "version": "0.13.2",
+  "version": "0.13.3",
   "description": "Hollo WebSocket Streaming + WebPush proxy (Mastodon API compat)",
   "main": "index.js",
   "type": "module",
