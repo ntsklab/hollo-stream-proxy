@@ -11,5 +11,8 @@
   "dependencies": {
       "web-push": "^3.6.7",
       "ws": "^8.21.1"
+    },
+    "engines": {
+      "node": ">=24.0.0"
     }
 }
