@@ -32,6 +32,9 @@ import {
   activeStreams,
   pushAccounts,
   VAPID_PUBLIC_KEY,
+  tryAcquireWsSlot,
+  releaseWsSlot,
+  isWsMessageAllowed,
 } from "./lib/streaming.js";
 import { startPolling, getPollTimer, setPollTimer } from "./lib/polling.js";
 
@@ -380,9 +383,15 @@ server.on("upgrade", async (req, socket, head) => {
 
   const account = tokenInfo.accountOwnerId;
 
+  if (!tryAcquireWsSlot()) {
+    socket.end("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n");
+    return;
+  }
+
   try {
     wss.handleUpgrade(req, socket, head, (ws) => {
       const subscriptions = new Map();
+      const rateState = { windowStart: Date.now(), count: 0 };
 
       function addSubscription(subStream, params = {}) {
         const subListId = subStream === "list" ? params.list : null;
@@ -408,6 +417,10 @@ server.on("upgrade", async (req, socket, head) => {
 
       ws.on("message", (data, isBinary) => {
         if (isBinary) return;
+        if (!isWsMessageAllowed(rateState)) {
+          try { ws.close(1008, "rate limited"); } catch {}
+          return;
+        }
         let json;
         try { json = JSON.parse(data.toString("utf8")); } catch { return; }
         if (!json || typeof json !== "object") return;
@@ -432,6 +445,7 @@ server.on("upgrade", async (req, socket, head) => {
       activeStreams.get(account).add(streamEntry);
 
       ws.on("close", () => {
+        releaseWsSlot();
         const streams = activeStreams.get(account);
         if (streams) {
           streams.delete(streamEntry);
@@ -446,6 +460,7 @@ server.on("upgrade", async (req, socket, head) => {
       startPolling();
     });
   } catch (err) {
+    releaseWsSlot();
     logger.error("ws upgrade: handleUpgrade failed", { account, error: err.message });
     if (!socket.destroyed) {
       socket.end("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n");
