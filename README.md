@@ -31,6 +31,7 @@ Push 通知および Streaming 非対応の Hollo で、擬似リアルタイム
 | `VAPID_PUBLIC_KEY` | | — | WebPush VAPID 公開鍵 |
 | `VAPID_PRIVATE_KEY` | | — | WebPush VAPID 秘密鍵（未設定時はプッシュ配信無効） |
 | `VAPID_SUBJECT` | | `https://example.com` | VAPID subject |
+| `PUBLIC_URL` | | — | 公開 URL（例: `https://hollo.example.com`）。設定時は instance API の `streaming` URL 等に使用し、`Host` ヘッダを無視する。未設定時は `Host` ヘッダを使用する |
 
 ## ヘルスチェック
 
