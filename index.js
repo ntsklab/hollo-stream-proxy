@@ -25,6 +25,7 @@ import {
   loadSubscriptions,
   deleteSubscription,
   updateAlerts,
+  validatePushSubscription,
 } from "./lib/pushSubscriptions.js";
 import {
   wss,
@@ -118,6 +119,9 @@ const server = createServer(async (req, res) => {
       const sub = parsed.subscription;
       const alertsData = parsed.data?.alerts || {};
       if (!sub?.endpoint || !sub?.keys?.p256dh || !sub?.keys?.auth) {
+        res.writeHead(400); res.end(JSON.stringify({ error: "Invalid subscription" })); return;
+      }
+      if (await validatePushSubscription(sub)) {
         res.writeHead(400); res.end(JSON.stringify({ error: "Invalid subscription" })); return;
       }
       await saveSubscription(id, sub, alertsData, bearerToken);
