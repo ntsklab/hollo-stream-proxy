@@ -34,7 +34,7 @@ spec:
             claimName: hollo-stream-proxy-data
       containers:
         - name: stream-proxy
-          image: ghcr.io/ntsklab/hollo-stream-proxy:0.13.8
+          image: ghcr.io/ntsklab/hollo-stream-proxy:0.13.9
           imagePullPolicy: IfNotPresent
           # ConfigMap / Secret の全キーを環境変数として一括注入
           envFrom:
