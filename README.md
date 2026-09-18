@@ -26,7 +26,7 @@ Push 通知および Streaming 非対応の Hollo で、擬似リアルタイム
 | `HOLLO_URL` | **必須** | — | Hollo の公開 URL |
 | `HOLLO_INTERNAL_URL` | | `HOLLO_URL` | Hollo の内部 URL（K8s Service DNS 等） |
 | `PORT` | | `3001` | リッスンポート |
-| `POLL_INTERVAL` | | `3000` | ポーリング間隔（ミリ秒） |
+| `POLL_INTERVAL` | | `5000` | ポーリング間隔（ミリ秒） |
 | `DATA_DIR` | | `/data` | 購読データの保存先（アクセストークンを含むため要保護、下記参照） |
 | `VAPID_PUBLIC_KEY` | | — | WebPush VAPID 公開鍵 |
 | `VAPID_PRIVATE_KEY` | | — | WebPush VAPID 秘密鍵（未設定時はプッシュ配信無効） |
@@ -36,6 +36,8 @@ Push 通知および Streaming 非対応の Hollo で、擬似リアルタイム
 | `WS_MAX_PAYLOAD` | | `65536` | WebSocket 受信メッセージ上限 (バイト) |
 | `WS_MAX_CONNECTIONS` | | `1000` | WebSocket 同時接続上限 (超過時は 503) |
 | `WS_MAX_MESSAGES_PER_MINUTE` | | `60` | 接続あたりの受信メッセージ上限 (超過時は切断) |
+| `MAX_BODY_BYTES` | | `65536` | Push API リクエストボディ上限 (バイト、超過時は 413) |
+| `TOKEN_CACHE_MAX_ENTRIES` | | `1000` | トークン検証キャッシュの上限エントリ数 |
 
 ## ヘルスチェック
 
@@ -53,7 +55,7 @@ Push 通知および Streaming 非対応の Hollo で、擬似リアルタイム
 ## コンテナイメージ
 
 ```
-ghcr.io/ntsklab/hollo-stream-proxy:0.13.5
+ghcr.io/ntsklab/hollo-stream-proxy:0.13.6
 ```
 
 ## デプロイ

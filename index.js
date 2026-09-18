@@ -423,11 +423,11 @@ server.on("upgrade", async (req, socket, head) => {
       }
 
       ws.on("message", (data, isBinary) => {
-        if (isBinary) return;
         if (!isWsMessageAllowed(rateState)) {
           try { ws.close(1008, "rate limited"); } catch {}
           return;
         }
+        if (isBinary) return;
         let json;
         try { json = JSON.parse(data.toString("utf8")); } catch { return; }
         if (!json || typeof json !== "object") return;
