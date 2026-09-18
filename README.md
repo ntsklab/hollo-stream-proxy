@@ -27,7 +27,7 @@ Push 通知および Streaming 非対応の Hollo で、擬似リアルタイム
 | `HOLLO_INTERNAL_URL` | | `HOLLO_URL` | Hollo の内部 URL（K8s Service DNS 等） |
 | `PORT` | | `3001` | リッスンポート |
 | `POLL_INTERVAL` | | `3000` | ポーリング間隔（ミリ秒） |
-| `DATA_DIR` | | `/data` | 購読データの保存先 |
+| `DATA_DIR` | | `/data` | 購読データの保存先（アクセストークンを含むため要保護、下記参照） |
 | `VAPID_PUBLIC_KEY` | | — | WebPush VAPID 公開鍵 |
 | `VAPID_PRIVATE_KEY` | | — | WebPush VAPID 秘密鍵（未設定時はプッシュ配信無効） |
 | `VAPID_SUBJECT` | | `https://example.com` | VAPID subject |
@@ -35,6 +35,12 @@ Push 通知および Streaming 非対応の Hollo で、擬似リアルタイム
 ## ヘルスチェック
 
 `GET /health` — `200 OK`
+
+## セキュリティ
+
+- `DATA_DIR/push_subscriptions.json` はクライアントの `access_token` を平文で含む。ファイルパーミッションは `0600` で作成されるが、ボリューム・バックアップのアクセス管理を行うこと
+- Push subscription の `endpoint` は `https:` のみ許可し、プライベート IP・解決失敗ドメインは拒否する
+- 本プロキシの前段にリバースプロキシを置き、TLS 終端・レート制限・リクエストサイズ制限を行うこと
 
 ## コンテナイメージ
 

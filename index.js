@@ -13,9 +13,9 @@
  * - データ取得: 各クライアントのトークンで Hollo API をポーリング
  */
 
-import { mkdir } from "node:fs/promises";
+import { mkdir, chmod } from "node:fs/promises";
 import { createServer } from "node:http";
-import { PORT, DATA_DIR, MAX_BODY_BYTES } from "./lib/config.js";
+import { PORT, DATA_DIR, MAX_BODY_BYTES, SUBS_FILE } from "./lib/config.js";
 import { logger } from "./lib/logger.js";
 import { verifyToken } from "./lib/verifyClientToken.js";
 import { fetchInstanceAPI } from "./lib/holloApiClient.js";
@@ -36,6 +36,11 @@ import {
 import { startPolling, getPollTimer, setPollTimer } from "./lib/polling.js";
 
 await mkdir(DATA_DIR, { recursive: true });
+try {
+  await chmod(SUBS_FILE, 0o600);
+} catch (err) {
+  if (err.code !== "ENOENT") logger.warn("failed to restrict subscription file permissions", { error: err.message });
+}
 
 async function readBody(req) {
   const declared = Number(req.headers["content-length"]);
