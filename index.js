@@ -15,7 +15,7 @@
 
 import { mkdir } from "node:fs/promises";
 import { createServer } from "node:http";
-import { PORT, DATA_DIR } from "./lib/config.js";
+import { PORT, DATA_DIR, MAX_BODY_BYTES } from "./lib/config.js";
 import { logger } from "./lib/logger.js";
 import { verifyToken } from "./lib/verifyClientToken.js";
 import { fetchInstanceAPI } from "./lib/holloApiClient.js";
@@ -35,6 +35,19 @@ import {
 import { startPolling, getPollTimer, setPollTimer } from "./lib/polling.js";
 
 await mkdir(DATA_DIR, { recursive: true });
+
+async function readBody(req) {
+  const declared = Number(req.headers["content-length"]);
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) return null;
+  let size = 0;
+  let body = "";
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > MAX_BODY_BYTES) return null;
+    body += chunk;
+  }
+  return body;
+}
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
@@ -94,8 +107,10 @@ const server = createServer(async (req, res) => {
     }
 
     if (req.method === "POST") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
+      const body = await readBody(req);
+      if (body === null) {
+        res.writeHead(413); res.end(JSON.stringify({ error: "Payload too large" })); return;
+      }
       let parsed;
       try { parsed = JSON.parse(body); } catch {
         res.writeHead(400); res.end(JSON.stringify({ error: "Invalid JSON" })); return;
@@ -118,8 +133,10 @@ const server = createServer(async (req, res) => {
     }
 
     if (req.method === "PUT") {
-      let body = "";
-      for await (const chunk of req) body += chunk;
+      const body = await readBody(req);
+      if (body === null) {
+        res.writeHead(413); res.end(JSON.stringify({ error: "Payload too large" })); return;
+      }
       let parsed;
       try { parsed = JSON.parse(body); } catch {
         res.writeHead(400); res.end(JSON.stringify({ error: "Invalid JSON" })); return;
