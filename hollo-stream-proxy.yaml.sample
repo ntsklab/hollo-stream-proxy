@@ -34,7 +34,7 @@ spec:
             claimName: hollo-stream-proxy-data
       containers:
         - name: stream-proxy
-          ghcr.io/ntsklab/hollo-stream-proxy:0.13.8
+          image: ghcr.io/ntsklab/hollo-stream-proxy:0.13.8
           imagePullPolicy: IfNotPresent
           env:
             - name: HOLLO_URL
@@ -62,6 +62,21 @@ spec:
               value: "/data"
             - name: PORT
               value: "3001"
+            # --- Optional: security hardening / tuning (defaults shown) ---
+            # - name: PUBLIC_URL
+            #   value: "https://stream.example.com"
+            # - name: ALLOWED_ORIGINS
+            #   value: "https://app1.example.com,https://app2.example.com"
+            # - name: WS_MAX_PAYLOAD
+            #   value: "65536"
+            # - name: WS_MAX_CONNECTIONS
+            #   value: "1000"
+            # - name: WS_MAX_MESSAGES_PER_MINUTE
+            #   value: "60"
+            # - name: MAX_BODY_BYTES
+            #   value: "65536"
+            # - name: TOKEN_CACHE_MAX_ENTRIES
+            #   value: "1000"
           resources:
             limits:
               cpu: "2000m"
