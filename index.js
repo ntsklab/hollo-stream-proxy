@@ -395,6 +395,15 @@ server.on("upgrade", async (req, socket, head) => {
     return;
   }
 
+  let wsSlotReleased = false;
+  const releaseWsSlotOnce = () => {
+    if (!wsSlotReleased) {
+      wsSlotReleased = true;
+      releaseWsSlot();
+    }
+  };
+  socket.once("close", releaseWsSlotOnce);
+
   try {
     wss.handleUpgrade(req, socket, head, (ws) => {
       const subscriptions = new Map();
@@ -456,7 +465,7 @@ server.on("upgrade", async (req, socket, head) => {
       activeStreams.get(account).add(streamEntry);
 
       ws.on("close", () => {
-        releaseWsSlot();
+        releaseWsSlotOnce();
         const streams = activeStreams.get(account);
         if (streams) {
           streams.delete(streamEntry);
@@ -471,7 +480,7 @@ server.on("upgrade", async (req, socket, head) => {
       startPolling();
     });
   } catch (err) {
-    releaseWsSlot();
+    releaseWsSlotOnce();
     logger.error("ws upgrade: handleUpgrade failed", { account, error: err.message });
     if (!socket.destroyed) {
       socket.end("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n");

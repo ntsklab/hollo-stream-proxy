@@ -55,7 +55,7 @@ Push 通知および Streaming 非対応の Hollo で、擬似リアルタイム
 ## コンテナイメージ
 
 ```
-ghcr.io/ntsklab/hollo-stream-proxy:0.13.6
+ghcr.io/ntsklab/hollo-stream-proxy:0.13.7
 ```
 
 ## デプロイ
