@@ -45,12 +45,15 @@ Push 通知および Streaming 非対応の Hollo で、擬似リアルタイム
 
 - `DATA_DIR/push_subscriptions.json` はクライアントの `access_token` を平文で含む。ファイルパーミッションは `0600` で作成されるが、ボリューム・バックアップのアクセス管理を行うこと
 - Push subscription の `endpoint` は `https:` のみ許可し、プライベート IP・解決失敗ドメインは拒否する
-- 本プロキシの前段にリバースプロキシを置き、TLS 終端・レート制限・リクエストサイズ制限を行うこと
+- WebSocket の `subscribe` メッセージは stream 名ホワイトリストで検証し、不正な stream には Mastodon 互換のエラー応答（`{"error": "Unknown stream type", "status": 400}`）を返す
+- 認証トークンの伝達は `Authorization: Bearer` ヘッダ（WebSocket では `Sec-WebSocket-Protocol` ヘッダも可）を推奨する。`access_token` クエリパラメータは Mastodon 互換のレガシー手段としてのみ残しており、新規クライアントでの使用は非推奨（クエリはアクセスログ等に残る恐れがあるため）
+- Push 配信ペイロードの `access_token` は Mastodon 本家仕様（`Web::NotificationSerializer`）との互換に必須のため保持する。ペイロード自体は Web Push 暗号化（aes128gcm）されるため、push サービス等の第三者に開示されることはない
+- 本プロキシの前段にリバースプロキシを置き、TLS 終端・レート制限・リクエストサイズ制限を行うこと。本プロキシ自体はセキュリティヘッダを付与しないため、前段で `X-Content-Type-Options: nosniff` 等を付与すること（Nginx 例を参照）
 
 ## コンテナイメージ
 
 ```
-ghcr.io/ntsklab/hollo-stream-proxy:0.13.4
+ghcr.io/ntsklab/hollo-stream-proxy:0.13.5
 ```
 
 ## デプロイ
@@ -84,12 +87,13 @@ kubectl apply -f hollo-stream-proxy.yaml
 ### WebSocket Streaming
 
 ```
-GET /api/v1/streaming?access_token=xxx&stream=user
+GET /api/v1/streaming?stream=user
+Authorization: Bearer <access_token>
 ```
 
 | パラメータ | 説明 |
 |---|---|
-| `access_token` | アクセストークン（**必須**） |
+| `access_token` | アクセストークン。`Authorization: Bearer` ヘッダ（WebSocket では `Sec-WebSocket-Protocol` ヘッダも可）での伝達を推奨。`?access_token=` クエリは Mastodon 互換のレガシー手段（非推奨） |
 | `stream` | ストリーム種別（`user`） |
 
 ### WebPush Subscription
@@ -110,7 +114,7 @@ DELETE /api/v1/push/subscription  — 購読解除
 - `reaction`（Hollo の `emoji_reaction` 用）
 
 Hollo の `emoji_reaction` 通知は `reaction` または `favourite` が有効な場合に配信されます。
-配信ペイロードは `{ access_token, notification_id, notification_type, icon, title, body, notification }` の JSON 形式です。
+配信ペイロードは `{ access_token, notification_id, notification_type, icon, title, body, notification }` の JSON 形式です（Mastodon 互換。`access_token` は通知の取得・アカウント紐付けにクライアントが使用する）。
 
 ### Instance API
 
@@ -179,10 +183,13 @@ location /api/v1/streaming {
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "upgrade";
     proxy_read_timeout 86400s;
+    add_header X-Content-Type-Options "nosniff" always;
 }
 
 location /api/v1/push/subscription {
     proxy_pass http://hollo-stream-proxy.NAMESPACE:3001;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer" always;
 }
 ```
 

@@ -35,6 +35,7 @@ import {
   tryAcquireWsSlot,
   releaseWsSlot,
   isWsMessageAllowed,
+  validateStreamRequest,
 } from "./lib/streaming.js";
 import { startPolling, getPollTimer, setPollTimer } from "./lib/polling.js";
 
@@ -258,8 +259,15 @@ const server = createServer(async (req, res) => {
       stream = "direct";
       params = {};
     } else {
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "Unknown stream" }));
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Unknown channel requested" }));
+      return;
+    }
+
+    const streamError = validateStreamRequest(stream, params);
+    if (streamError) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: streamError }));
       return;
     }
 
@@ -356,8 +364,7 @@ server.on("upgrade", async (req, socket, head) => {
     return;
   }
 
-  const validStreams = ["user", "user:notification", "list", "public", "public:local", "public:remote", "hashtag", "hashtag:local"];
-  if (!validStreams.includes(stream)) {
+  if (validateStreamRequest(stream, { list: listId, tag })) {
     socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
     return;
   }
@@ -426,10 +433,14 @@ server.on("upgrade", async (req, socket, head) => {
         if (!json || typeof json !== "object") return;
         const { type, stream: msgStream, ...params } = json;
         if (type === "subscribe" && typeof msgStream === "string") {
-          addSubscription(msgStream, params);
-          startPolling();
+          if (validateStreamRequest(msgStream, params)) {
+            try { ws.send(JSON.stringify({ error: "Unknown stream type", status: 400 })); } catch {}
+          } else {
+            addSubscription(msgStream, params);
+            startPolling();
+          }
         } else if (type === "unsubscribe" && typeof msgStream === "string") {
-          removeSubscription(msgStream, params);
+          if (!validateStreamRequest(msgStream, params)) removeSubscription(msgStream, params);
         }
       });
 
