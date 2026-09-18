@@ -15,7 +15,7 @@
 
 import { mkdir, chmod } from "node:fs/promises";
 import { createServer } from "node:http";
-import { PORT, DATA_DIR, MAX_BODY_BYTES, SUBS_FILE } from "./lib/config.js";
+import { PORT, DATA_DIR, MAX_BODY_BYTES, SUBS_FILE, ALLOWED_ORIGINS } from "./lib/config.js";
 import { logger } from "./lib/logger.js";
 import { verifyToken } from "./lib/verifyClientToken.js";
 import { fetchInstanceAPI } from "./lib/holloApiClient.js";
@@ -60,7 +60,13 @@ const server = createServer(async (req, res) => {
   const path = url.pathname;
 
   if (path.startsWith("/api/")) {
-    res.setHeader("Access-Control-Allow-Origin", "*");
+    const origin = req.headers.origin || "";
+    if (ALLOWED_ORIGINS.length === 0) {
+      res.setHeader("Access-Control-Allow-Origin", "*");
+    } else if (origin && ALLOWED_ORIGINS.includes(origin)) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+      res.setHeader("Vary", "Origin");
+    }
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
     if (req.method === "OPTIONS") {
