@@ -36,6 +36,7 @@ import {
   releaseWsSlot,
   isWsMessageAllowed,
   validateStreamRequest,
+  subscriptionKey,
 } from "./lib/streaming.js";
 import { startPolling, getPollTimer, setPollTimer } from "./lib/polling.js";
 
@@ -51,10 +52,14 @@ async function readBody(req) {
   if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) return null;
   let size = 0;
   let body = "";
-  for await (const chunk of req) {
-    size += chunk.length;
-    if (size > MAX_BODY_BYTES) return null;
-    body += chunk;
+  try {
+    for await (const chunk of req) {
+      size += chunk.length;
+      if (size > MAX_BODY_BYTES) return null;
+      body += chunk;
+    }
+  } catch {
+    return null;
   }
   return body;
 }
@@ -274,7 +279,7 @@ const server = createServer(async (req, res) => {
     const account = tokenInfo.accountOwnerId;
     const subListId = stream === "list" ? params.list : null;
     const subTag = (stream === "hashtag" || stream === "hashtag:local") ? params.tag : null;
-    const key = subListId ? `list:${subListId}` : subTag ? `${stream}:${subTag}` : stream;
+    const key = subscriptionKey(stream, { list: subListId, tag: subTag });
     const subscriptions = new Map();
     subscriptions.set(key, { stream, listId: subListId, tag: subTag });
 
@@ -412,7 +417,7 @@ server.on("upgrade", async (req, socket, head) => {
       function addSubscription(subStream, params = {}) {
         const subListId = subStream === "list" ? params.list : null;
         const subTag = (subStream === "hashtag" || subStream === "hashtag:local") ? params.tag : null;
-        const key = subListId ? `list:${subListId}` : subTag ? `${subStream}:${subTag}` : subStream;
+        const key = subscriptionKey(subStream, { list: subListId, tag: subTag });
         subscriptions.set(key, { stream: subStream, listId: subListId, tag: subTag });
         logger.stream("subscribed", { account, stream: subStream, listId: subListId, tag: subTag });
       }
@@ -420,15 +425,9 @@ server.on("upgrade", async (req, socket, head) => {
       function removeSubscription(subStream, params = {}) {
         const subListId = subStream === "list" ? params.list : null;
         const subTag = (subStream === "hashtag" || subStream === "hashtag:local") ? params.tag : null;
-        const key = subListId ? `list:${subListId}` : subTag ? `${subStream}:${subTag}` : subStream;
+        const key = subscriptionKey(subStream, { list: subListId, tag: subTag });
         subscriptions.delete(key);
         logger.stream("unsubscribed", { account, stream: subStream, listId: subListId, tag: subTag });
-      }
-
-      function hasSubscription(subStream, listIdOrTag = null) {
-        if (subStream === "list") return subscriptions.has(`list:${listIdOrTag}`);
-        if (subStream === "hashtag" || subStream === "hashtag:local") return subscriptions.has(`${subStream}:${listIdOrTag}`);
-        return subscriptions.has(subStream);
       }
 
       ws.on("message", (data, isBinary) => {

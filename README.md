@@ -55,7 +55,7 @@ Push 通知および Streaming 非対応の Hollo で、擬似リアルタイム
 ## コンテナイメージ
 
 ```
-ghcr.io/ntsklab/hollo-stream-proxy:0.13.7
+ghcr.io/ntsklab/hollo-stream-proxy:0.13.8
 ```
 
 ## デプロイ
@@ -96,7 +96,9 @@ Authorization: Bearer <access_token>
 | パラメータ | 説明 |
 |---|---|
 | `access_token` | アクセストークン。`Authorization: Bearer` ヘッダ（WebSocket では `Sec-WebSocket-Protocol` ヘッダも可）での伝達を推奨。`?access_token=` クエリは Mastodon 互換のレガシー手段（非推奨） |
-| `stream` | ストリーム種別（`user`） |
+| `stream` | ストリーム種別（`user`, `user:notification`, `public`, `public:local`, `public:remote`, `hashtag`, `hashtag:local`, `list`, `direct`） |
+
+> `direct` は Mastodon 互換のため受諾しますが、Hollo に DM 一覧 API（`/api/v1/conversations` 相当）が存在しないため、現状イベントは配信されません（Hollo の home タイムライン自体が DM を除外する仕様のため合成も不可）。
 
 ### WebPush Subscription
 
@@ -117,6 +119,8 @@ DELETE /api/v1/push/subscription  — 購読解除
 
 Hollo の `emoji_reaction` 通知は `reaction` または `favourite` が有効な場合に配信されます。
 配信ペイロードは `{ access_token, notification_id, notification_type, icon, title, body, notification }` の JSON 形式です（Mastodon 互換。`access_token` は通知の取得・アカウント紐付けにクライアントが使用する）。
+
+登録時の endpoint 検証（https 限定・プライベート IP 拒否・DNS 解決確認）に加え、配信直前にも DNS を再解決してプライベート IP を指す endpoint への送信をスキップします（DNS リバインディング対策）。
 
 ### Instance API
 
